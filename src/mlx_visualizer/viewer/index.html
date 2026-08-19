@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLX Visualizer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="brand">MLX <span>Visualizer</span></div>
+  <div id="controls">
+    <button id="mode-grid" class="mode active" title="Packed grid layout">Grid</button>
+    <button id="mode-graph" class="mode" title="Architecture graph layout">Architecture</button>
+    <select id="cmap-override" title="Colormap override">
+      <option value="">per-tensor colormap</option>
+      <option value="viridis">viridis</option>
+      <option value="magma">magma</option>
+      <option value="turbo">turbo</option>
+      <option value="coolwarm">coolwarm</option>
+      <option value="gray">gray</option>
+    </select>
+    <button id="pause" title="Pause/resume rendering">Pause</button>
+    <button id="fit" title="Fit all panels in view">Fit</button>
+  </div>
+  <div id="status">
+    <span id="conn" class="dot off"></span>
+    <span id="hud">connecting…</span>
+  </div>
+</header>
+<main id="stage">
+  <canvas id="gl"></canvas>
+  <div id="world">
+    <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="labels"></div>
+  </div>
+  <div id="tooltip" hidden></div>
+  <div id="empty" hidden>
+    <h2>No tensors watched yet</h2>
+    <pre>from mlx_visualizer import Visualizer
+
+viz = Visualizer()
+viz.watch("weights/w1", lambda: model.w1)
+viz.start()</pre>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-visualizer"
+version = "0.1.0"
+description = "Asynchronous, high-performance visualization of large MLX (and NumPy) matrices and vectors in a live web view, with batched GPU rendering and architecture graphs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "MoonFingerRF" }]
+keywords = ["mlx", "visualization", "matrix", "tensor", "webgl", "heatmap"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+mlx = ["mlx>=0.5"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mlx_visualizer = ["viewer/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
