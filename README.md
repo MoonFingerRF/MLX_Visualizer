@@ -10,10 +10,10 @@ data costs your computation essentially nothing.
 ## Highlights
 
 - **Asynchronous by construction.** The visualizer owns a background thread
-  with its own event loop. Your compute thread only registers watches (a dict
-  insert behind a lock); snapshotting, reduction, encoding, and network I/O
-  all happen off your critical path, and NumPy releases the GIL for the heavy
-  reductions.
+  with its own event loop. Snapshotting, reduction, encoding, and network I/O
+  happen there. MLX GPU watches cooperatively stage a CPU copy on their owning
+  thread because MLX streams are thread-local; all later work stays off the
+  compute path.
 - **Extremely large matrices.** A 100,000×100,000 matrix is reduced with
   exact block means computed in fixed-size row bands, so peak extra memory is
   bounded regardless of input size. Each capture tick has a wall-clock budget;
@@ -26,7 +26,9 @@ data costs your computation essentially nothing.
   many matrices are on screen.
 - **Space-efficient, beautiful layout.** Shelf-packed grid sized by log-scale
   of tensor dimensions, or an **Architecture** mode that lays tensors out as a
-  layered dataflow graph with edges you declare via `viz.connect(...)`.
+  layered dataflow graph with edges you declare via `viz.connect(...)`. Labels
+  scale and simplify with zoom, hide before becoming clutter, and wrap without
+  clipping when expanded.
 - **Change-aware streaming.** Frames are fingerprinted (CRC32 of the reduced
   image); unchanged tensors are never re-sent. Slow clients get per-connection
   queues that drop stale frames instead of back-pressuring the pipeline.
@@ -59,14 +61,17 @@ For an MLX model, one call watches every parameter **and captures the
 architecture automatically**:
 
 ```python
+import mlx.core as mx
 from mlx_visualizer import Visualizer
 
 viz = Visualizer()                       # or Visualizer(port=0) for a random port
-viz.watch_module("mlp", model)           # watches all params; the first forward
-                                         # pass is traced to discover the graph
+viz.watch_module("mlp", model, staged=True)  # safe for MLX GPU parameters;
+                                             # first forward discovers the graph
 url = viz.start()                        # non-blocking; open the printed URL
 
-... your training / compute loop runs at full speed ...
+... optimizer update ...
+mx.eval(model.parameters(), optimizer.state)
+viz.refresh()                            # run on the MLX/compute thread
 
 viz.stop()
 ```
@@ -82,10 +87,11 @@ instrumentation removes itself after one pass either way.
 Individual arrays and custom flows still work manually:
 
 ```python
-viz.watch("weights/w1", lambda: model.w1)          # callables are re-resolved live
-viz.watch("weights/b1", lambda: model.b1, colormap="coolwarm")
+viz.watch("weights/w1", lambda: model.w1, staged=True)
+viz.watch("weights/b1", lambda: model.b1, colormap="coolwarm", staged=True)
 viz.metric("training/loss", lambda: current_loss, history=500)
 viz.connect("weights/w1", "weights/b1")            # manual architecture edge
+viz.refresh()                                        # after MLX updates
 ```
 
 Watch anything: MLX arrays, NumPy arrays, torch tensors, or zero-argument
@@ -105,9 +111,10 @@ Visualizer(host="127.0.0.1", port=8791, *, interval=0.25, max_side=1024,
 
 | Method | Description |
 | --- | --- |
-| `watch(name, provider, *, group="", colormap="viridis", every=1)` | Track an array or provider callable. `every=N` samples on every Nth tick. |
-| `metric(name, provider, *, group="", colormap="turbo", every=1, history=512)` | Plot a scalar/provider as a bounded live time series. |
-| `watch_module(name, module, *, sample_input=None, trace=None, every=1, param_filter=None)` | Watch every parameter of an `mlx.nn.Module` tree and auto-capture its architecture by tracing a forward pass (immediately with `sample_input`/`trace`, otherwise lazily on the first real forward). |
+| `watch(name, provider, *, group="", colormap="viridis", every=1, staged=False)` | Track an array or provider callable. Use `staged=True` for MLX GPU arrays. |
+| `metric(name, provider, *, group="", colormap="turbo", every=1, history=512, staged=False)` | Plot a scalar/provider as a bounded live time series. Use staging for MLX GPU scalars. |
+| `watch_module(name, module, *, sample_input=None, trace=None, every=1, param_filter=None, staged=False)` | Watch every module parameter and auto-capture its architecture. Use `staged=True` for MLX GPU modules. |
+| `refresh()` | Copy staged watches on the caller/compute thread. Call after `mx.eval(...)`; the worker never touches the original GPU arrays. |
 | `unwatch(name)` | Stop tracking. |
 | `connect(src, dst)` | Declare a dataflow edge manually (custom flows; `watch_module` does this automatically). |
 | `start(open_browser=False)` | Start the worker thread + server; returns the URL. |
@@ -115,7 +122,7 @@ Visualizer(host="127.0.0.1", port=8791, *, interval=0.25, max_side=1024,
 
 A module-level default instance is available for quick use:
 `mlx_visualizer.watch(...)`, `mlx_visualizer.connect(...)`,
-`mlx_visualizer.start()`.
+`mlx_visualizer.refresh()`, `mlx_visualizer.start()`.
 
 Colormaps: `viridis`, `magma`, `turbo`, `coolwarm`, `gray`. NaNs render
 magenta and are counted in the panel stats.
@@ -131,6 +138,10 @@ magenta and are counted in the panel stats.
    layer (zero-copy `Float32Array` view); the whole scene is one
    `drawArraysInstanced` call; normalization and colormapping run in the
    fragment shader; labels/edges are DOM/SVG positioned per frame.
+
+MLX GPU streams are thread-local. For GPU-backed watches, `staged=True` plus
+`refresh()` performs the MLX→NumPy copy cooperatively on the training thread;
+all reduction, encoding, and transport remain asynchronous afterward.
 
 ## Examples
 
@@ -154,4 +165,5 @@ The test suite covers the reduction math (banded vs. unbanded equivalence,
 non-divisible edges, NaN handling), the wire protocol round trip, the
 registry/graph, and full end-to-end tests over a real socket: hello →
 snapshots → exact-value pick, LOD for a 4096² matrix, and the
-no-resend-when-unchanged guarantee.
+no-resend-when-unchanged guarantee, MLX thread-safe staging, and browser
+reconnection.

@@ -165,6 +165,7 @@ def watch_module(
     trace: Optional[Callable[[], Any]] = None,
     every: int = 1,
     param_filter: Optional[Callable[[str, str], bool]] = None,
+    staged: bool = False,
 ) -> Any:
     """Watch all parameters of a module tree and auto-capture its graph.
 
@@ -185,6 +186,9 @@ def watch_module(
     param_filter:
         Optional ``(module_path, param_name) -> bool`` to select which
         parameters get watched.
+    staged:
+        Register parameters for caller-thread CPU staging. Use this for MLX
+        GPU modules and call ``viz.refresh()`` after parameter updates.
 
     If neither ``sample_input`` nor ``trace`` is given, the module tree
     is instrumented lazily: the first forward pass the user's own code
@@ -210,7 +214,7 @@ def watch_module(
             watch_name = f"{group}/{key}"
             cmap = PARAM_COLORMAPS.get(key, "viridis")
             viz.watch(watch_name, (lambda m=mod, k=key: m[k]),
-                      group=group, colormap=cmap, every=every)
+                      group=group, colormap=cmap, every=every, staged=staged)
             if rep is None or key == "weight":
                 rep = watch_name
         if rep is not None:

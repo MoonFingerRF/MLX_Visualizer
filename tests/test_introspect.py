@@ -156,6 +156,21 @@ def test_param_filter():
     assert watch_names(viz) == {"mlp/l1/weight", "mlp/l2/weight", "mlp/l3/weight"}
 
 
+def test_staged_watch_module_builds_initial_cpu_copies():
+    viz = Visualizer(port=0)
+    viz.watch_module(
+        "mlp", MLP(), sample_input=mx.zeros((1, 4)),
+        param_filter=lambda _path, key: key == "weight", staged=True,
+    )
+    watches = viz.registry.items()
+    assert len(watches) == 3
+    assert all(watch.staged for watch in watches)
+    for watch in watches:
+        matrix, shape = viz.registry.staged_data(watch.id)
+        assert matrix is not None
+        assert shape is not None
+
+
 def test_rejects_non_modules():
     viz = Visualizer(port=0)
     with pytest.raises(TypeError):

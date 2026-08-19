@@ -1,6 +1,7 @@
 """End-to-end: real server, real socket client, real frames."""
 
 import json
+import threading
 import time
 import urllib.request
 
@@ -31,6 +32,7 @@ def test_serves_viewer_over_http(viz):
     assert b"MLX Visualizer" in html
     js = urllib.request.urlopen(f"http://{host}:{port}/app.js", timeout=5).read()
     assert b"drawArraysInstanced" in js
+    assert b"labelStyleForZoom" in js
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(f"http://{host}:{port}/nope.txt", timeout=5)
 
@@ -117,6 +119,35 @@ def test_unchanged_data_is_not_resent(viz):
         client.close()
 
 
+def test_reconnected_client_receives_unchanged_initial_snapshot(viz):
+    viz.watch("static", np.ones((8, 8)))
+    host, port = _host_port(viz)
+
+    first = WSClient(host, port)
+    try:
+        first.recv_message()  # hello
+        while True:
+            opcode, _payload = first.recv_message()
+            if opcode == 2:
+                break
+    finally:
+        first.close()
+
+    second = WSClient(host, port)
+    second.sock.settimeout(5)
+    try:
+        second.recv_message()  # hello
+        while True:
+            opcode, payload = second.recv_message()
+            if opcode == 2:
+                meta, image = decode_snapshot(payload)
+                assert meta["name"] == "static"
+                np.testing.assert_allclose(image, 1)
+                break
+    finally:
+        second.close()
+
+
 def test_large_matrix_is_downsampled(viz):
     big = np.zeros((4096, 4096), dtype=np.float32)
     big[0, 0] = 100.0
@@ -162,5 +193,66 @@ def test_metric_streams_as_scalar_snapshot(viz):
                 assert image[0, 0] == pytest.approx(2.5)
                 return
         pytest.fail("no metric snapshot received")
+    finally:
+        client.close()
+
+
+def test_staged_provider_is_only_resolved_on_refreshing_thread(viz):
+    owner_thread = threading.get_ident()
+    provider_calls = []
+    data = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+    def provider():
+        provider_calls.append(threading.get_ident())
+        assert threading.get_ident() == owner_thread
+        return data
+
+    viz.watch("gpu-safe", provider, staged=True)
+    viz.refresh()
+
+    host, port = _host_port(viz)
+    client = WSClient(host, port)
+    try:
+        client.recv_message()  # hello
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            opcode, payload = client.recv_message()
+            if opcode == 2:
+                meta, image = decode_snapshot(payload)
+                assert meta["name"] == "gpu-safe"
+                np.testing.assert_allclose(image, data)
+                break
+        else:
+            pytest.fail("no staged snapshot received")
+        assert provider_calls == [owner_thread]
+    finally:
+        client.close()
+
+
+def test_mlx_gpu_staged_snapshot_never_enters_worker_stream(viz):
+    mx = pytest.importorskip("mlx.core")
+    owner_thread = threading.get_ident()
+    data = mx.arange(12, dtype=mx.float32).reshape(3, 4)
+
+    def provider():
+        assert threading.get_ident() == owner_thread
+        return data
+
+    viz.watch("mlx-gpu-safe", provider, staged=True)
+    viz.refresh()
+
+    host, port = _host_port(viz)
+    client = WSClient(host, port)
+    try:
+        client.recv_message()  # hello
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            opcode, payload = client.recv_message()
+            if opcode == 2:
+                meta, image = decode_snapshot(payload)
+                assert meta["name"] == "mlx-gpu-safe"
+                np.testing.assert_allclose(image, np.arange(12).reshape(3, 4))
+                return
+        pytest.fail("no MLX staged snapshot received")
     finally:
         client.close()

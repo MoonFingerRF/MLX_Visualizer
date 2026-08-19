@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .adapter import Provider
 from .snapshot import Snapshot
@@ -22,6 +22,9 @@ class Watch:
     colormap: str = "viridis"
     kind: str = "tensor"
     history: int = 512
+    staged: bool = False
+    staged_matrix: Optional[Any] = None
+    staged_shape: Optional[Tuple[int, ...]] = None
     every: int = 1  # capture on every Nth tick
     tick: int = 0
     last_fingerprint: Optional[int] = None
@@ -52,7 +55,8 @@ class Registry:
     # -- mutation (user thread) -------------------------------------------
     def watch(self, name: str, provider: Provider, *, group: str = "",
               colormap: str = "viridis", every: int = 1,
-              kind: str = "tensor", history: int = 512) -> Watch:
+              kind: str = "tensor", history: int = 512,
+              staged: bool = False) -> Watch:
         if kind not in {"tensor", "metric"}:
             raise ValueError("kind must be 'tensor' or 'metric'")
         with self._lock:
@@ -64,12 +68,15 @@ class Registry:
                 existing.every = max(1, every)
                 existing.kind = kind
                 existing.history = max(2, int(history))
+                existing.staged = staged
+                existing.staged_matrix = None
+                existing.staged_shape = None
                 existing.dirty = True
                 self._structure_version += 1
                 return existing
             w = Watch(id=next(_id_counter), name=name, provider=provider,
                       group=group, colormap=colormap, every=max(1, every),
-                      kind=kind, history=max(2, int(history)))
+                      kind=kind, history=max(2, int(history)), staged=staged)
             self._watches[name] = w
             self._structure_version += 1
             return w
@@ -90,6 +97,24 @@ class Registry:
                 self._graph.edges.append(edge)
                 self._structure_version += 1
 
+    def set_staged(self, name: str, matrix: Any,
+                   original_shape: Tuple[int, ...]) -> None:
+        """Atomically replace the CPU snapshot source for a staged watch."""
+        with self._lock:
+            watch = self._watches.get(name)
+            if watch is None or not watch.staged:
+                return
+            watch.staged_matrix = matrix
+            watch.staged_shape = original_shape
+            watch.dirty = True
+            watch.failing = False
+
+    def mark_all_dirty(self) -> None:
+        """Force one fresh frame for every watch (for a newly joined client)."""
+        with self._lock:
+            for watch in self._watches.values():
+                watch.dirty = True
+
     # -- access (worker thread) -------------------------------------------
     def items(self) -> List[Watch]:
         with self._lock:
@@ -101,6 +126,14 @@ class Registry:
                 if w.id == watch_id:
                     return w
         return None
+
+    def staged_data(self, watch_id: int) -> Tuple[Any, Optional[Tuple[int, ...]]]:
+        """Return a consistent matrix/shape pair for a staged watch."""
+        with self._lock:
+            for watch in self._watches.values():
+                if watch.id == watch_id:
+                    return watch.staged_matrix, watch.staged_shape
+        return None, None
 
     @property
     def structure_version(self) -> int:

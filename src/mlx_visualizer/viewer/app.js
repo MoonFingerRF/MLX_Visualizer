@@ -289,11 +289,34 @@ function relayout() {
 
 // ------------------------------------------------------------ DOM labels/edges
 const labelsEl = $("labels"), edgesEl = $("edges");
+const LABEL_HIDE_ZOOM = 0.18;
+const LABEL_FADE_ZOOM = 0.48;
+const LABEL_MIN_SCALE = 0.4;
+const LABEL_MAX_SCALE = 1.75;
+const LABEL_READABLE_SCALE = 0.48;
 edgesEl.innerHTML =
   '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
   'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
   '<path d="M0,0 L10,5 L0,10 z" fill="#5ad0b1" fill-opacity="0.6"/></marker></defs>';
 const edgePaths = new Map();
+
+function breakableLabel(text) {
+  return text.replaceAll("/", "/\u200b").replaceAll(".", ".\u200b");
+}
+
+function labelStyleForZoom(zoom) {
+  const scale = Math.max(
+    LABEL_MIN_SCALE,
+    Math.min(LABEL_MAX_SCALE, Math.pow(zoom, 0.65)),
+  );
+  const fade = Math.max(0, Math.min(
+    1,
+    (zoom - LABEL_HIDE_ZOOM) / (LABEL_FADE_ZOOM - LABEL_HIDE_ZOOM),
+  ));
+  // Smoothstep keeps labels from popping in as the user zooms.
+  const opacity = fade * fade * (3 - 2 * fade);
+  return { scale, opacity, hidden: zoom <= LABEL_HIDE_ZOOM };
+}
 
 function syncLabels() {
   for (const p of panels.values()) {
@@ -305,36 +328,89 @@ function syncLabels() {
         '<div class="meta"></div><div class="stats"></div>';
       labelsEl.appendChild(p.labelEl);
     }
-    p.labelEl.querySelector(".name").textContent = p.name;
-    p.labelEl.querySelector(".group").textContent = p.group ? "· " + p.group : "";
+    const groupText = p.group ? "· " + p.group : "";
+    let metaText, statsText;
     if (p.kind === "metric") {
       const finite = p.historyData.filter(Number.isFinite);
       const lo = finite.length ? Math.min(...finite) : NaN;
       const hi = finite.length ? Math.max(...finite) : NaN;
-      p.labelEl.querySelector(".meta").textContent =
-        `${p.historyData.length}/${p.history} samples`;
-      p.labelEl.querySelector(".stats").textContent =
-        `latest ${fmt(p.latest)}  range ${fmt(lo)}…${fmt(hi)}`;
+      metaText = `${p.historyData.length}/${p.history} samples`;
+      statsText = `latest ${fmt(p.latest)}  range ${fmt(lo)}…${fmt(hi)}`;
     } else {
-      p.labelEl.querySelector(".meta").textContent =
-        p.shape ? "(" + p.shape.join("×") + ")" +
-          (p.texW < p.cols || p.texH < p.rows ? "  LOD " + p.texW + "×" + p.texH : "") : "";
-      p.labelEl.querySelector(".stats").textContent = p.shape
+      metaText = p.shape ? "(" + p.shape.join("×") + ")" +
+        (p.texW < p.cols || p.texH < p.rows ? "  LOD " + p.texW + "×" + p.texH : "") : "";
+      statsText = p.shape
         ? `min ${fmt(p.vmin)}  max ${fmt(p.vmax)}  μ ${fmt(p.mean)}  σ ${fmt(p.std)}` +
           (p.nan ? `  NaN ${p.nan}` : "")
         : "";
     }
+    const signature = `${p.name}\0${groupText}\0${metaText}\0${statsText}`;
+    if (p.labelSignature === signature) continue;
+    p.labelEl.querySelector(".name").textContent = breakableLabel(p.name);
+    p.labelEl.querySelector(".group").textContent = groupText;
+    p.labelEl.querySelector(".meta").textContent = metaText;
+    p.labelEl.querySelector(".stats").textContent = statsText;
+    p.labelSignature = signature;
+    p.labelSizeDirty = true;
   }
 }
 
 function positionOverlay() {
+  const labelStyle = labelStyleForZoom(cam.zoom);
+  const viewWidth = canvas.clientWidth, viewHeight = canvas.clientHeight;
   for (const p of panels.values()) {
     if (!p.labelEl) continue;
-    if (!panelReady(p)) { p.labelEl.style.display = "none"; continue; }
-    p.labelEl.style.display = "";
     const sx = p.x * cam.zoom + cam.x, sy = p.y * cam.zoom + cam.y;
-    p.labelEl.style.transform = `translate(${sx}px, ${sy - 50}px)`;
-    p.labelEl.style.maxWidth = Math.max(150, p.dw * cam.zoom) + "px";
+    const panelWidth = p.dw * cam.zoom, panelHeight = p.dh * cam.zoom;
+    const visibleWidth = Math.max(
+      0, Math.min(sx + panelWidth, viewWidth) - Math.max(sx, 0),
+    );
+    const visibleHeight = Math.max(
+      0, Math.min(sy + panelHeight, viewHeight) - Math.max(sy, 0),
+    );
+    // Do not pin the label of a mostly off-screen panel over its neighbor.
+    // It appears as soon as the user pans that panel substantially into view.
+    const panelVisible = visibleWidth >= panelWidth * 0.9 &&
+      visibleHeight >= panelHeight * 0.5;
+    if (!panelReady(p) || labelStyle.hidden || !panelVisible) {
+      p.labelEl.style.display = "none";
+      continue;
+    }
+    p.labelEl.style.display = "";
+    const layoutMode = cam.zoom >= 2.25 ? "detailed" : "compact";
+    const labelWidth = Math.max(48, panelWidth / labelStyle.scale);
+    const layoutKey = `${layoutMode}:${labelWidth.toFixed(2)}`;
+    if (p.labelLayoutKey !== layoutKey) {
+      p.labelEl.classList.toggle("compact", layoutMode === "compact");
+      p.labelEl.style.width = `${labelWidth}px`;
+      p.labelLayoutKey = layoutKey;
+      p.labelSizeDirty = true;
+    }
+    if (p.labelSizeDirty || !p.labelWidth || !p.labelHeight) {
+      p.labelWidth = p.labelEl.scrollWidth;
+      p.labelHeight = p.labelEl.scrollHeight;
+      p.labelSizeDirty = false;
+    }
+    // Compact labels show the complete, wrapped name while fitting inside
+    // the row gap. Details return once zoom provides enough room for them.
+    const rowGap = (mode === "grid" ? 46 : 56) * cam.zoom;
+    const verticalFit = layoutMode === "compact"
+      ? Math.max(0.05, (rowGap - 8) / Math.max(p.labelHeight, 1))
+      : labelStyle.scale;
+    const scale = Math.min(labelStyle.scale, verticalFit);
+    if (scale < LABEL_READABLE_SCALE) {
+      p.labelEl.style.display = "none";
+      continue;
+    }
+    const renderedWidth = p.labelWidth * scale;
+    const renderedHeight = p.labelHeight * scale;
+    const gap = 8 * scale;
+    const labelX = Math.max(8, Math.min(sx, viewWidth - renderedWidth - 8));
+    let labelY = sy - renderedHeight - gap;
+    if (labelY < 8) labelY = sy + panelHeight + gap;
+    labelY = Math.max(8, Math.min(labelY, viewHeight - renderedHeight - 8));
+    p.labelEl.style.opacity = labelStyle.opacity.toFixed(3);
+    p.labelEl.style.transform = `translate(${labelX}px, ${labelY}px) scale(${scale})`;
   }
   const wantEdges = mode === "graph";
   edgesEl.style.display = wantEdges ? "" : "none";
@@ -534,7 +610,9 @@ function handleJSON(msg) {
               historyData: [], latest: null,
               layer: -1, image: null, texW: 0, texH: 0, rows: 0, cols: 0,
               shape: null, vmin: 0, vmax: 1, mean: 0, std: 0, nan: 0,
-              x: 0, y: 0, dw: 0, dh: 0, labelEl: null };
+              x: 0, y: 0, dw: 0, dh: 0, labelEl: null,
+              labelWidth: 0, labelHeight: 0, labelSizeDirty: true,
+              labelSignature: "", labelLayoutKey: "" };
         panels.set(w.id, p);
         panelOrder.push(w.id);
       } else {

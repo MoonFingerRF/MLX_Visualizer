@@ -39,12 +39,13 @@ viz = Visualizer(interval=0.25)
 # Watches l1/l2/l3 weight+bias and auto-discovers l1 → l2 → l3 by
 # tracing this sample forward pass. Omit sample_input and the first
 # real training step is traced instead.
-viz.watch_module("mlp", model, sample_input=mx.zeros((1, DIN)))
+viz.watch_module("mlp", model, sample_input=mx.zeros((1, DIN)), staged=True)
 # Gradients are not module parameters, so watch them explicitly.
 for i in (1, 2, 3):
     viz.watch(f"mlp/l{i}/dW",
               (lambda n: lambda: last_grads.get(n, mx.zeros((1, 1))))(f"l{i}"),
-              group=f"mlp/l{i}", colormap="magma")
+              group=f"mlp/l{i}", colormap="magma", staged=True)
+viz.refresh()
 print("open", viz.start())
 
 
@@ -64,5 +65,9 @@ while True:
     for i in (1, 2, 3):
         last_grads[f"l{i}"] = grads[f"l{i}"]["weight"]
     step += 1
+    if step % 10 == 0:
+        # MLX GPU streams are thread-local, so copy watched arrays from the
+        # training thread. Reduction and transport still happen in the worker.
+        viz.refresh()
     if step % 100 == 0:
         print(f"step {step}  loss {loss.item():.4f}")

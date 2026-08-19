@@ -4,6 +4,7 @@ import pytest
 from mlx_visualizer.protocol import decode_snapshot, encode_snapshot
 from mlx_visualizer.registry import Registry
 from mlx_visualizer.snapshot import take_snapshot
+from mlx_visualizer.visualizer import Visualizer
 
 
 def test_snapshot_roundtrip():
@@ -66,3 +67,35 @@ def test_duplicate_edges_are_ignored():
     reg.connect("a", "b")
     reg.connect("a", "b")
     assert reg.structure_message()["edges"] == [["a", "b"]]
+
+
+def test_refresh_stages_an_isolated_float32_copy():
+    data = np.arange(6, dtype=np.float64).reshape(2, 3)
+    viz = Visualizer(port=0)
+    viz.watch("staged", lambda: data, staged=True)
+
+    viz.refresh()
+    watch = viz.registry.items()[0]
+    matrix, shape = viz.registry.staged_data(watch.id)
+    assert shape == (2, 3)
+    assert matrix.dtype == np.float32
+    assert matrix.flags.c_contiguous
+    np.testing.assert_allclose(matrix, data)
+
+    data[:] = -1
+    assert matrix[0, 0] == 0  # the worker's current copy is immutable by convention
+    viz.refresh()
+    updated, _ = viz.registry.staged_data(watch.id)
+    np.testing.assert_allclose(updated, data)
+
+
+def test_refresh_stages_scalar_metrics():
+    viz = Visualizer(port=0)
+    viz.metric("staged-loss", lambda: np.asarray(2.5), staged=True)
+    viz.refresh()
+
+    watch = viz.registry.items()[0]
+    matrix, shape = viz.registry.staged_data(watch.id)
+    assert shape == ()
+    assert matrix.shape == (1, 1)
+    assert matrix[0, 0] == pytest.approx(2.5)

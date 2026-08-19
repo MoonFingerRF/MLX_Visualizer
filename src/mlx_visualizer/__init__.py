@@ -16,6 +16,7 @@ __all__ = [
     "metric",
     "watch_module",
     "connect",
+    "refresh",
     "start",
     "stop",
 ]
@@ -42,6 +43,11 @@ def watch_module(name, module, **kwargs):
 def connect(src: str, dst: str):
     """Add an architecture edge on the shared default visualizer."""
     return _default.connect(src, dst)
+
+
+def refresh():
+    """Refresh caller-thread CPU copies for staged watches."""
+    return _default.refresh()
 
 
 def start(**kwargs) -> str:
