@@ -1,4 +1,4 @@
-"""A compact character Transformer for the Shakespeare notebook.
+"""A compact character Transformer for the multi-source text notebook.
 
 The default configuration has roughly 4.8 million parameters, trains on
 Apple silicon with MLX, and intentionally keeps the data pipeline and model
@@ -11,7 +11,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -40,6 +40,7 @@ class CharCorpus:
     vocab: Tuple[str, ...]
     train: np.ndarray
     validation: np.ndarray
+    sources: Tuple[str, ...] = ()
 
     @property
     def vocab_size(self) -> int:
@@ -98,36 +99,82 @@ class ShakespeareTransformer(nn.Module):
         return self.output(self.final_norm(hidden))
 
 
-def find_shakespeare_path(explicit_path: Optional[Path] = None) -> Path:
-    """Find the locally copied corpus from either repo or notebook cwd."""
+def find_text_path(filename: str, explicit_path: Optional[Path] = None) -> Path:
+    """Find a local text source from either the repo or notebook cwd."""
     candidates = []
     if explicit_path is not None:
         candidates.append(Path(explicit_path).expanduser())
     candidates.extend([
-        Path.cwd() / "data" / "shakespeare.txt",
-        Path.cwd().parent / "data" / "shakespeare.txt",
-        Path(__file__).resolve().parents[1] / "data" / "shakespeare.txt",
+        Path.cwd() / "data" / filename,
+        Path.cwd().parent / "data" / filename,
+        Path(__file__).resolve().parents[1] / "data" / filename,
     ])
     for path in candidates:
         if path.is_file():
             return path.resolve()
     tried = "\n".join(f"  - {path}" for path in candidates)
     raise FileNotFoundError(
-        "Shakespeare corpus not found. Copy shakespeare.txt to data/. Tried:\n" + tried
+        f"Text source {filename!r} not found. Copy it to data/. Tried:\n" + tried
     )
 
 
-def load_corpus(path: Path, validation_fraction: float = 0.1) -> CharCorpus:
-    text = Path(path).read_text(encoding="utf-8")
-    if not text:
-        raise ValueError(f"corpus is empty: {path}")
-    vocab = tuple(sorted(set(text)))
+def find_shakespeare_path(explicit_path: Optional[Path] = None) -> Path:
+    """Backward-compatible convenience wrapper for the original example."""
+    return find_text_path("shakespeare.txt", explicit_path)
+
+
+PathInput = Union[str, Path]
+
+
+def load_corpus(
+    paths: Union[PathInput, Sequence[PathInput]],
+    validation_fraction: float = 0.1,
+) -> CharCorpus:
+    """Load one or more text files into one shared character vocabulary.
+
+    Each source is split independently before the fragments are concatenated.
+    This guarantees that both training and validation contain every source,
+    instead of making validation an accidental slice of the final file.
+    """
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    if isinstance(paths, (str, Path)):
+        source_paths = (Path(paths),)
+    else:
+        source_paths = tuple(Path(path) for path in paths)
+    if not source_paths:
+        raise ValueError("at least one text source is required")
+
+    texts = []
+    for path in source_paths:
+        text = path.read_text(encoding="utf-8")
+        if not text:
+            raise ValueError(f"corpus source is empty: {path}")
+        texts.append(text)
+
+    vocab = tuple(sorted(set().union(*(set(text) for text in texts))))
     lookup = {char: index for index, char in enumerate(vocab)}
-    tokens = np.fromiter((lookup[char] for char in text), dtype=np.int32)
-    split = int(len(tokens) * (1.0 - validation_fraction))
-    if split <= 0 or split >= len(tokens):
-        raise ValueError("validation_fraction must leave non-empty train and validation sets")
-    return CharCorpus(vocab=vocab, train=tokens[:split], validation=tokens[split:])
+    train_parts = []
+    validation_parts = []
+    for path, text in zip(source_paths, texts):
+        split = int(len(text) * (1.0 - validation_fraction))
+        if split <= 0 or split >= len(text):
+            raise ValueError(
+                "validation_fraction must leave non-empty train and validation "
+                f"sets for {path}"
+            )
+        train_parts.append(np.fromiter(
+            (lookup[char] for char in text[:split]), dtype=np.int32,
+        ))
+        validation_parts.append(np.fromiter(
+            (lookup[char] for char in text[split:]), dtype=np.int32,
+        ))
+    return CharCorpus(
+        vocab=vocab,
+        train=np.concatenate(train_parts),
+        validation=np.concatenate(validation_parts),
+        sources=tuple(str(path.resolve()) for path in source_paths),
+    )
 
 
 def random_batch(
@@ -284,6 +331,7 @@ def save_checkpoint(
     metadata = {
         "config": asdict(model.config),
         "vocab": list(corpus.vocab),
+        "sources": list(corpus.sources),
         "parameters": parameter_count(model),
     }
     (destination / "metadata.json").write_text(

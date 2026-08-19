@@ -62,6 +62,24 @@ def test_metric_metadata_and_validation():
         reg.watch("bad", 0.0, kind="histogram")
 
 
+def test_optional_display_metadata_is_sent_in_structure():
+    reg = Registry()
+    watch = reg.watch(
+        "model/layers.0/query_proj/weight", np.zeros((4, 4)),
+        label="Layer 1 · Query projection", role="attention-query",
+    )
+    assert reg.structure_message()["watches"][0] == {
+        "id": watch.id,
+        "name": "model/layers.0/query_proj/weight",
+        "group": "",
+        "label": "Layer 1 · Query projection",
+        "role": "attention-query",
+        "colormap": "viridis",
+        "kind": "tensor",
+        "history": 512,
+    }
+
+
 def test_duplicate_edges_are_ignored():
     reg = Registry()
     reg.connect("a", "b")

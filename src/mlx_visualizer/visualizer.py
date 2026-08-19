@@ -82,6 +82,7 @@ class Visualizer:
 
     # -- registration (any thread) ------------------------------------------
     def watch(self, name: str, provider: Provider, *, group: str = "",
+              label: str = "", role: str = "",
               colormap: str = "viridis", every: int = 1,
               staged: bool = False) -> "Visualizer":
         """Track an array or a zero-argument callable returning one.
@@ -91,8 +92,8 @@ class Visualizer:
         the resulting CPU copy, avoiding cross-thread GPU stream access.
         """
         self.registry.watch(
-            name, provider, group=group, colormap=colormap, every=every,
-            staged=staged,
+            name, provider, group=group, label=label, role=role,
+            colormap=colormap, every=every, staged=staged,
         )
         return self
 

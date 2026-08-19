@@ -63,13 +63,39 @@ button.mode.active { background: var(--accent); color: #06211a; border-color: va
   transform-origin: left top;
   will-change: transform, opacity;
 }
-.label .name { font-weight: 700; }
+.label .title { display: flex; align-items: baseline; gap: 5px; }
+.label .name { min-width: 0; font-weight: 700; }
+.label .role {
+  flex: none; min-width: 1.6em; padding: 0 4px;
+  border: 1px solid currentColor; border-radius: 4px;
+  font-size: .72em; font-weight: 800; line-height: 1.45;
+  text-align: center; letter-spacing: .025em;
+}
+.label .role:empty { display: none; }
+.label .role[data-role="attention-query"] { color: #52d6ff; }
+.label .role[data-role="attention-key"] { color: #bd8cff; }
+.label .role[data-role="attention-value"] { color: #78db91; }
+.label .role[data-role="attention-output"] { color: #ffb45e; }
+.label .role[data-role="mlp-up"] { color: #ff85cc; }
+.label .role[data-role="mlp-down"] { color: #7da6ff; }
+.label .role[data-role$="embedding"] { color: #e7c86a; }
+.label .role[data-role$="normalization"] { color: #9aa8c2; }
+.label .role[data-role="vocabulary-output"] { color: #ff8c78; }
+.label .path { color: #64718b; font-size: .72em; }
 .label .meta { color: var(--muted); font-size: .85em; }
 .label .stats { color: var(--muted); font-size: .8em; }
 .label .group { color: var(--accent); font-size: .8em; }
 .label.compact .group,
+.label.compact .path,
 .label.compact .meta,
 .label.compact .stats { display: none; }
+.label.compact {
+  padding: 2px 4px;
+  background: #090d16c7;
+  border-radius: 4px;
+  text-shadow: 0 1px 2px #000;
+}
+.label.compact.badge-only .name { display: none; }
 
 #tooltip {
   position: absolute; z-index: 10; pointer-events: none;
@@ -78,6 +104,7 @@ button.mode.active { background: var(--accent); color: #06211a; border-color: va
   box-shadow: 0 4px 18px #0009;
 }
 #tooltip .v { color: var(--accent); font-weight: 700; }
+#tooltip .path { color: var(--muted); font-size: .8em; max-width: 420px; overflow-wrap: anywhere; }
 
 #empty[hidden] { display: none; }
 #empty {

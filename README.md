@@ -44,12 +44,13 @@ data costs your computation essentially nothing.
 pip install -e .
 ```
 
-For the Shakespeare training notebook (MLX + Jupyter included):
+For the multi-source text training notebook (MLX + Jupyter included):
 
 ```bash
 pip install -e ".[notebook]"
 mkdir -p data
 cp /path/to/shakespeare.txt data/shakespeare.txt
+cp "/path/to/King James Bible.txt" "data/King James Bible.txt"
 jupyter lab examples/shakespeare_transformer.ipynb
 ```
 
@@ -84,6 +85,12 @@ activations). Pass `sample_input=` (or `trace=lambda: model(a, b)`) to
 capture the graph immediately instead of on the first real step; the
 instrumentation removes itself after one pass either way.
 
+Recognized Transformer parameters receive concise architecture labels and
+role badges. Query, key, and value projections are laid out as parallel
+branches into the attention output, followed by clearly marked MLP up and
+down projections; the full parameter path remains available in detailed
+labels and hover tooltips.
+
 Individual arrays and custom flows still work manually:
 
 ```python
@@ -111,7 +118,7 @@ Visualizer(host="127.0.0.1", port=8791, *, interval=0.25, max_side=1024,
 
 | Method | Description |
 | --- | --- |
-| `watch(name, provider, *, group="", colormap="viridis", every=1, staged=False)` | Track an array or provider callable. Use `staged=True` for MLX GPU arrays. |
+| `watch(name, provider, *, group="", label="", role="", colormap="viridis", every=1, staged=False)` | Track an array or provider callable. Optional display metadata can provide a short label and semantic role. Use `staged=True` for MLX GPU arrays. |
 | `metric(name, provider, *, group="", colormap="turbo", every=1, history=512, staged=False)` | Plot a scalar/provider as a bounded live time series. Use staging for MLX GPU scalars. |
 | `watch_module(name, module, *, sample_input=None, trace=None, every=1, param_filter=None, staged=False)` | Watch every module parameter and auto-capture its architecture. Use `staged=True` for MLX GPU modules. |
 | `refresh()` | Copy staged watches on the caller/compute thread. Call after `mx.eval(...)`; the worker never touches the original GPU arrays. |
@@ -151,8 +158,9 @@ all reduction, encoding, and transport remain asynchronous afterward.
   `watch_module` call (architecture auto-captured), plus per-layer
   gradient watches.
 - `examples/shakespeare_transformer.ipynb` — train and sample a sub-10M
-  character Transformer on a local Shakespeare corpus while watching loss,
-  throughput, and model parameters update live.
+  character Transformer on local Shakespeare and King James Bible text while
+  watching loss, throughput, and model parameters update live. Add filenames
+  to `SOURCE_FILENAMES` to include more stories.
 
 ## Development
 

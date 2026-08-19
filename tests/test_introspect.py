@@ -5,6 +5,7 @@ nn = pytest.importorskip("mlx.nn")
 
 from mlx_visualizer import Visualizer
 from mlx_visualizer.introspect import _edges_from_records
+from examples.shakespeare_transformer import ShakespeareTransformer, TransformerConfig
 
 
 class MLP(nn.Module):
@@ -187,3 +188,43 @@ def test_edges_from_records_prefers_dataflow_over_sequence():
         (3, [t1], [t3]),
     ]
     assert _edges_from_records(records) == [(1, 2), (1, 3)]
+
+
+def test_transformer_roles_and_attention_topology_are_intuitive():
+    model = ShakespeareTransformer(
+        48,
+        TransformerConfig(
+            context_length=8, model_dim=16, num_heads=4,
+            num_layers=1, mlp_dim=32,
+        ),
+    )
+    viz = Visualizer(port=0)
+    viz.watch_module(
+        "transformer", model,
+        sample_input=mx.zeros((1, 8), dtype=mx.int32),
+        param_filter=lambda _path, key: key == "weight",
+        staged=True,
+    )
+    structure = viz.registry.structure_message()
+    by_role = {
+        watch.get("role"): watch
+        for watch in structure["watches"] if watch.get("role")
+    }
+    assert by_role["attention-query"]["label"] == "Layer 1 · Query"
+    assert by_role["attention-key"]["label"] == "Layer 1 · Key"
+    assert by_role["attention-value"]["label"] == "Layer 1 · Value"
+    assert by_role["attention-output"]["label"] == "Layer 1 · Attention output"
+    assert by_role["mlp-up"]["label"] == "Layer 1 · MLP up"
+    assert by_role["mlp-down"]["label"] == "Layer 1 · MLP down"
+
+    edges = {tuple(edge) for edge in structure["edges"]}
+    attention_output = by_role["attention-output"]["name"]
+    for role in ("attention-query", "attention-key", "attention-value"):
+        assert (by_role[role]["name"], attention_output) in edges
+
+    token = by_role["token-embedding"]["name"]
+    position = by_role["position-embedding"]["name"]
+    attention_norm = by_role["attention-normalization"]["name"]
+    assert (token, position) not in edges
+    assert (token, attention_norm) in edges
+    assert (position, attention_norm) in edges

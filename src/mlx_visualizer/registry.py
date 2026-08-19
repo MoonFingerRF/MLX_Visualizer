@@ -19,6 +19,8 @@ class Watch:
     name: str
     provider: Provider
     group: str = ""
+    label: str = ""
+    role: str = ""
     colormap: str = "viridis"
     kind: str = "tensor"
     history: int = 512
@@ -54,6 +56,7 @@ class Registry:
 
     # -- mutation (user thread) -------------------------------------------
     def watch(self, name: str, provider: Provider, *, group: str = "",
+              label: str = "", role: str = "",
               colormap: str = "viridis", every: int = 1,
               kind: str = "tensor", history: int = 512,
               staged: bool = False) -> Watch:
@@ -64,6 +67,8 @@ class Registry:
             if existing is not None:
                 existing.provider = provider
                 existing.group = group or existing.group
+                existing.label = label or existing.label
+                existing.role = role or existing.role
                 existing.colormap = colormap
                 existing.every = max(1, every)
                 existing.kind = kind
@@ -75,7 +80,8 @@ class Registry:
                 self._structure_version += 1
                 return existing
             w = Watch(id=next(_id_counter), name=name, provider=provider,
-                      group=group, colormap=colormap, every=max(1, every),
+                      group=group, label=label, role=role,
+                      colormap=colormap, every=max(1, every),
                       kind=kind, history=max(2, int(history)), staged=staged)
             self._watches[name] = w
             self._structure_version += 1
@@ -143,14 +149,23 @@ class Registry:
     def structure_message(self) -> dict:
         """JSON-serializable description of watches + graph for clients."""
         with self._lock:
+            watches = []
+            for w in self._watches.values():
+                item = {
+                    "id": w.id, "name": w.name, "group": w.group,
+                    "colormap": w.colormap, "kind": w.kind,
+                    "history": w.history,
+                }
+                # Optional fields keep the wire format backwards-compatible
+                # for generic watches while allowing architecture-aware names.
+                if w.label:
+                    item["label"] = w.label
+                if w.role:
+                    item["role"] = w.role
+                watches.append(item)
             return {
                 "type": "structure",
                 "version": self._structure_version,
-                "watches": [
-                    {"id": w.id, "name": w.name, "group": w.group,
-                     "colormap": w.colormap, "kind": w.kind,
-                     "history": w.history}
-                    for w in self._watches.values()
-                ],
+                "watches": watches,
                 "edges": [[s, d] for s, d in self._graph.edges],
             }

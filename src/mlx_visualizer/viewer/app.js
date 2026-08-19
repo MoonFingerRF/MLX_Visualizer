@@ -19,6 +19,12 @@ function fmt(x) {
   return +x.toFixed(4) + "";
 }
 
+function escapeHTML(text) {
+  const el = document.createElement("span");
+  el.textContent = String(text);
+  return el.innerHTML;
+}
+
 // ------------------------------------------------------------------ colormaps
 const CMAP_STOPS = {
   viridis: [[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]],
@@ -321,7 +327,18 @@ function architectureItems(ids) {
     const p = panels.get(id);
     return { p, ...panelDisplaySize(p), ...metadata.get(p.name) };
   });
+  const roleOrder = {
+    "token-embedding": 0, "position-embedding": 1,
+    "attention-normalization": 10,
+    "attention-query": 11, "attention-key": 12, "attention-value": 13,
+    "attention-output": 14, "mlp-normalization": 20,
+    "mlp-up": 21, "mlp-down": 22,
+    "transformer-normalization": 30, "final-normalization": 31,
+    "vocabulary-output": 32,
+  };
+  const semanticRank = (item) => roleOrder[item.p.role] ?? 100;
   items.sort((a, b) => a.depth - b.depth ||
+    semanticRank(a) - semanticRank(b) ||
     a.groupRank - b.groupRank || Number(b.connected) - Number(a.connected) ||
     a.rank - b.rank || a.order - b.order);
   return items;
@@ -439,6 +456,15 @@ edgesEl.innerHTML =
   'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
   '<path d="M0,0 L10,5 L0,10 z" fill="#5ad0b1" fill-opacity="0.6"/></marker></defs>';
 const edgePaths = new Map();
+const ROLE_BADGES = {
+  "token-embedding": "TOKEN", "position-embedding": "POSITION",
+  "attention-normalization": "NORM",
+  "attention-query": "Q", "attention-key": "K", "attention-value": "V",
+  "attention-output": "ATTN OUT", "mlp-normalization": "NORM",
+  "mlp-up": "MLP ↑", "mlp-down": "MLP ↓",
+  "transformer-normalization": "NORM", "final-normalization": "NORM",
+  "vocabulary-output": "LOGITS",
+};
 
 function breakableLabel(text) {
   return text.replaceAll("/", "/\u200b").replaceAll(".", ".\u200b");
@@ -464,11 +490,15 @@ function syncLabels() {
       p.labelEl = document.createElement("div");
       p.labelEl.className = "label";
       p.labelEl.innerHTML =
-        '<div><span class="name"></span> <span class="group"></span></div>' +
+        '<div class="title"><span class="role"></span><span class="name"></span>' +
+        ' <span class="group"></span></div><div class="path"></div>' +
         '<div class="meta"></div><div class="stats"></div>';
       labelsEl.appendChild(p.labelEl);
     }
-    const groupText = p.group ? "· " + p.group : "";
+    const displayName = p.label || p.name;
+    const roleText = ROLE_BADGES[p.role] || "";
+    const pathText = p.label ? p.name : "";
+    const groupText = !p.label && p.group ? "· " + p.group : "";
     let metaText, statsText;
     if (p.kind === "metric") {
       const finite = p.historyData.filter(Number.isFinite);
@@ -484,10 +514,14 @@ function syncLabels() {
           (p.nan ? `  NaN ${p.nan}` : "")
         : "";
     }
-    const signature = `${p.name}\0${groupText}\0${metaText}\0${statsText}`;
+    const signature = `${displayName}\0${p.role}\0${pathText}\0${groupText}\0${metaText}\0${statsText}`;
     if (p.labelSignature === signature) continue;
-    p.labelEl.querySelector(".name").textContent = breakableLabel(p.name);
+    const roleEl = p.labelEl.querySelector(".role");
+    roleEl.textContent = roleText;
+    roleEl.dataset.role = p.role || "";
+    p.labelEl.querySelector(".name").textContent = breakableLabel(displayName);
     p.labelEl.querySelector(".group").textContent = groupText;
+    p.labelEl.querySelector(".path").textContent = breakableLabel(pathText);
     p.labelEl.querySelector(".meta").textContent = metaText;
     p.labelEl.querySelector(".stats").textContent = statsText;
     p.labelSignature = signature;
@@ -518,10 +552,16 @@ function positionOverlay() {
     }
     p.labelEl.style.display = "";
     const layoutMode = cam.zoom >= 2.25 ? "detailed" : "compact";
-    const labelWidth = Math.max(48, panelWidth / labelStyle.scale);
-    const layoutKey = `${layoutMode}:${labelWidth.toFixed(2)}`;
+    const badgeOnly = layoutMode === "compact" && panelWidth < 110 &&
+      ["attention-output", "mlp-up", "mlp-down"].includes(p.role);
+    const labelWidth = Math.max(
+      48,
+      (layoutMode === "compact" ? panelWidth - 8 : panelWidth) / labelStyle.scale,
+    );
+    const layoutKey = `${layoutMode}:${badgeOnly}:${labelWidth.toFixed(2)}`;
     if (p.labelLayoutKey !== layoutKey) {
       p.labelEl.classList.toggle("compact", layoutMode === "compact");
+      p.labelEl.classList.toggle("badge-only", badgeOnly);
       p.labelEl.style.width = `${labelWidth}px`;
       p.labelLayoutKey = layoutKey;
       p.labelSizeDirty = true;
@@ -531,11 +571,11 @@ function positionOverlay() {
       p.labelHeight = p.labelEl.scrollHeight;
       p.labelSizeDirty = false;
     }
-    // Compact labels show the complete, wrapped name while fitting inside
-    // the row gap. Details return once zoom provides enough room for them.
-    const rowGap = (mode === "grid" ? GRID_ROW_GAP : ARCH_ITEM_GAP) * cam.zoom;
+    // Compact labels stay inside their own panel. That keeps tightly packed
+    // parallel branches (especially Transformer Q/K/V) from covering one
+    // another. Details return outside the panel at high zoom.
     const verticalFit = layoutMode === "compact"
-      ? Math.max(0.05, (rowGap - 8) / Math.max(p.labelHeight, 1))
+      ? Math.max(0.05, (panelHeight - 8) / Math.max(p.labelHeight, 1))
       : labelStyle.scale;
     const scale = Math.min(labelStyle.scale, verticalFit);
     if (scale < LABEL_READABLE_SCALE) {
@@ -545,9 +585,16 @@ function positionOverlay() {
     const renderedWidth = p.labelWidth * scale;
     const renderedHeight = p.labelHeight * scale;
     const gap = 8 * scale;
-    const labelX = Math.max(8, Math.min(sx, viewWidth - renderedWidth - 8));
-    let labelY = sy - renderedHeight - gap;
-    if (labelY < 8) labelY = sy + panelHeight + gap;
+    const labelX = layoutMode === "compact"
+      ? Math.max(8, Math.min(sx + 4, viewWidth - renderedWidth - 8))
+      : Math.max(8, Math.min(sx, viewWidth - renderedWidth - 8));
+    let labelY;
+    if (layoutMode === "compact") {
+      labelY = Math.min(sy + 4, sy + panelHeight - renderedHeight - 4);
+    } else {
+      labelY = sy - renderedHeight - gap;
+      if (labelY < 8) labelY = sy + panelHeight + gap;
+    }
     labelY = Math.max(8, Math.min(labelY, viewHeight - renderedHeight - 8));
     p.labelEl.style.opacity = labelStyle.opacity.toFixed(3);
     p.labelEl.style.transform = `translate(${labelX}px, ${labelY}px) scale(${scale})`;
@@ -746,6 +793,7 @@ function handleJSON(msg) {
       let p = panels.get(w.id);
       if (!p) {
         p = { id: w.id, name: w.name, group: w.group, cmap: w.colormap,
+              label: w.label || "", role: w.role || "",
               kind: w.kind || "tensor", history: w.history || 512,
               historyData: [], latest: null,
               layer: -1, image: null, texW: 0, texH: 0, rows: 0, cols: 0,
@@ -757,6 +805,7 @@ function handleJSON(msg) {
         panelOrder.push(w.id);
       } else {
         p.name = w.name; p.group = w.group; p.cmap = w.colormap;
+        p.label = w.label || ""; p.role = w.role || "";
         p.kind = w.kind || "tensor"; p.history = w.history || 512;
         if (p.historyData.length > p.history)
           p.historyData = p.historyData.slice(-p.history);
@@ -882,7 +931,9 @@ function hover(e) {
     tooltip.style.left = (e.clientX - rect.left + 14) + "px";
     tooltip.style.top = (e.clientY - rect.top + 14) + "px";
     tooltip.innerHTML =
-      `<div>${hit.name}</div><div class="v">${fmt(hit.latest)}</div>`;
+      `<div>${escapeHTML(hit.label || hit.name)}</div>` +
+      (hit.label ? `<div class="path">${escapeHTML(hit.name)}</div>` : "") +
+      `<div class="v">${fmt(hit.latest)}</div>`;
     pickPending = null;
     return;
   }
@@ -897,7 +948,8 @@ function hover(e) {
   tooltip.style.top = (e.clientY - rect.top + 14) + "px";
   const lod = hit.texW < hit.cols || hit.texH < hit.rows;
   tooltip.innerHTML =
-    `<div>${hit.name} [${row}, ${col}]</div>` +
+    `<div>${escapeHTML(hit.label || hit.name)} [${row}, ${col}]</div>` +
+    (hit.label ? `<div class="path">${escapeHTML(hit.name)}</div>` : "") +
     `<div class="v" id="tt-value">${lod ? "block μ " : ""}${fmt(approx)}</div>`;
   if (lod && ws && ws.readyState === 1) {
     pickPending = { id: hit.id, row, col };

@@ -11,6 +11,7 @@ from examples.shakespeare_transformer import (
     ShakespeareTransformer,
     TransformerConfig,
     generate_text,
+    load_corpus,
     parameter_count,
     save_checkpoint,
     train_model,
@@ -30,6 +31,27 @@ def test_default_model_is_under_ten_million_parameters():
     assert parameter_count(model) < 10_000_000
     logits = model(mx.zeros((2, 16), dtype=mx.int32))
     assert logits.shape == (2, 16, 80)
+
+
+def test_load_corpus_accepts_multiple_sources_and_splits_each(tmp_path: Path):
+    story = tmp_path / "story.txt"
+    scripture = tmp_path / "scripture.txt"
+    story.write_text("AAAAAaaaaa", encoding="utf-8")
+    scripture.write_text("BBBBBbbbbb", encoding="utf-8")
+
+    corpus = load_corpus([story, scripture], validation_fraction=0.2)
+
+    assert corpus.decode(corpus.train) == "AAAAAaaaBBBBBbbb"
+    assert corpus.decode(corpus.validation) == "aabb"
+    assert corpus.sources == (str(story.resolve()), str(scripture.resolve()))
+
+
+def test_load_corpus_still_accepts_one_path(tmp_path: Path):
+    source = tmp_path / "one.txt"
+    source.write_text("abcdefghij", encoding="utf-8")
+    corpus = load_corpus(source, validation_fraction=0.2)
+    assert corpus.decode(corpus.train) == "abcdefgh"
+    assert corpus.decode(corpus.validation) == "ij"
 
 
 def test_tiny_train_generate_and_save(tmp_path: Path):
