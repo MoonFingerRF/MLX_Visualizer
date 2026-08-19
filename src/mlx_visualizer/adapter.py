@@ -22,6 +22,30 @@ def resolve(provider: Provider) -> ArrayLike:
     return provider
 
 
+def _ensure_evaluated(x: ArrayLike) -> None:
+    """Force evaluation of MLX lazy arrays before touching their buffer.
+
+    On builds where compute streams are thread-local (e.g. the Linux CPU
+    build), evaluating a foreign thread's lazy graph raises a catchable
+    RuntimeError from ``mx.eval`` — but converting it with ``np.asarray``
+    directly would hard-abort the process. Calling ``mx.eval`` first turns
+    the dangerous case into a skippable error; for already-evaluated
+    arrays (e.g. after the standard ``mx.eval(model.parameters())`` in a
+    training step) it is a safe no-op everywhere.
+    """
+    if type(x).__module__.split(".")[0] == "mlx":
+        import mlx.core as mx
+
+        try:
+            mx.eval(x)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "cannot evaluate a lazy MLX array from the visualizer "
+                "thread on this platform; call mx.eval() on it in your "
+                "compute loop first"
+            ) from exc
+
+
 def to_numpy_2d(x: ArrayLike) -> Tuple[np.ndarray, Tuple[int, ...]]:
     """Convert an array-like object to a 2-D float NumPy view.
 
@@ -35,6 +59,7 @@ def to_numpy_2d(x: ArrayLike) -> Tuple[np.ndarray, Tuple[int, ...]]:
         x = x.detach()
         if hasattr(x, "cpu"):
             x = x.cpu()
+    _ensure_evaluated(x)
     a = np.asarray(x)
     original_shape = a.shape
     if a.ndim == 0:
@@ -55,6 +80,7 @@ def pick_value(provider: Provider, row: int, col: int) -> float:
     NumPy and MLX arrays.
     """
     x = resolve(provider)
+    _ensure_evaluated(x)
     a = np.asarray(x) if not hasattr(x, "shape") else x
     shape = tuple(int(s) for s in a.shape)
     if len(shape) == 0:
@@ -74,6 +100,7 @@ def pick_value(provider: Provider, row: int, col: int) -> float:
             r //= s
         idx = tuple(reversed(idx)) + (c,)
         v = a[idx]
+    _ensure_evaluated(v)  # indexing an MLX array yields a new lazy array
     if hasattr(v, "item"):
         return float(v.item())
     return float(v)

@@ -25,6 +25,7 @@ class Watch:
     last_fingerprint: Optional[int] = None
     last_snapshot: Optional[Snapshot] = None
     dirty: bool = True  # force first send
+    failing: bool = False  # rate-limits snapshot error logging
 
 
 @dataclass

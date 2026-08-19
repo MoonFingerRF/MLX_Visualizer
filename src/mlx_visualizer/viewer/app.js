@@ -237,11 +237,22 @@ function layoutGraph() {
       if (indegWork.get(m) === 0) queue.push(m);
     }
   }
+  // Panels that participate in no edge (e.g. biases) sit in the same
+  // column as their group's connected representative instead of piling
+  // into column 0.
+  const connected = new Set();
+  for (const [s, d] of edges) { connected.add(s); connected.add(d); }
+  const groupDepth = new Map();
+  for (const p of panels.values())
+    if (p.group && connected.has(p.name))
+      groupDepth.set(p.group, Math.max(groupDepth.get(p.group) ?? 0, depth.get(p.name) || 0));
   const cols = new Map();
   for (const id of panelOrder) {
     const p = panels.get(id);
     if (p.texW <= 0) continue;
-    const d = depth.get(p.name) || 0;
+    const d = connected.has(p.name)
+      ? (depth.get(p.name) || 0)
+      : (groupDepth.get(p.group) ?? 0);
     if (!cols.has(d)) cols.set(d, []);
     cols.get(d).push(p);
   }

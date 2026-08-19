@@ -13,6 +13,7 @@ __all__ = [
     "downsample",
     "block_mean",
     "watch",
+    "watch_module",
     "connect",
     "start",
     "stop",
@@ -24,6 +25,12 @@ _default: Visualizer = Visualizer()
 def watch(name, provider, **kwargs):
     """Watch an array on the shared default visualizer."""
     return _default.watch(name, provider, **kwargs)
+
+
+def watch_module(name, module, **kwargs):
+    """Watch a whole module tree (auto-captures its architecture) on the
+    shared default visualizer."""
+    return _default.watch_module(name, module, **kwargs)
 
 
 def connect(src: str, dst: str):

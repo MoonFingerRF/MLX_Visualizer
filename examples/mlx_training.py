@@ -1,10 +1,12 @@
-"""Visualize an MLX MLP's weights, activations and gradients while it trains.
+"""Visualize an MLX MLP's weights and gradients while it trains.
 
-Requires: pip install mlx  (Apple silicon)
+Requires: pip install mlx
 
-The Architecture view shows the data flow through the network; each
-watched tensor updates live as training progresses, with zero changes to
-the training loop itself beyond registering the watches.
+One `watch_module` call watches every parameter of the model AND
+captures the architecture automatically by tracing the first forward
+pass — no manual `connect` calls needed. The Architecture view then
+shows the real dataflow through the network, updating live as training
+progresses.
 """
 
 import mlx.core as mx
@@ -34,14 +36,15 @@ optimizer = optim.Adam(learning_rate=1e-3)
 last_grads = {}
 
 viz = Visualizer(interval=0.25)
-for i, layer in enumerate((model.l1, model.l2, model.l3), start=1):
-    name = f"mlp/l{i}"
-    viz.watch(f"{name}/W", (lambda l: lambda: l.weight)(layer), group=name)
-    viz.watch(f"{name}/b", (lambda l: lambda: l.bias)(layer), group=name, colormap="coolwarm")
-    viz.watch(f"{name}/dW", (lambda n: lambda: last_grads.get(n, mx.zeros((1, 1))))(f"l{i}"),
-              group=name, colormap="magma")
-viz.connect("mlp/l1/W", "mlp/l2/W")
-viz.connect("mlp/l2/W", "mlp/l3/W")
+# Watches l1/l2/l3 weight+bias and auto-discovers l1 → l2 → l3 by
+# tracing this sample forward pass. Omit sample_input and the first
+# real training step is traced instead.
+viz.watch_module("mlp", model, sample_input=mx.zeros((1, DIN)))
+# Gradients are not module parameters, so watch them explicitly.
+for i in (1, 2, 3):
+    viz.watch(f"mlp/l{i}/dW",
+              (lambda n: lambda: last_grads.get(n, mx.zeros((1, 1))))(f"l{i}"),
+              group=f"mlp/l{i}", colormap="magma")
 print("open", viz.start())
 
 

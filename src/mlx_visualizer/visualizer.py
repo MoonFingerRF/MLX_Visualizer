@@ -90,8 +90,27 @@ class Visualizer:
         self.registry.unwatch(name)
 
     def connect(self, src: str, dst: str) -> "Visualizer":
-        """Declare an architecture edge from watch ``src`` to watch ``dst``."""
+        """Declare an architecture edge from watch ``src`` to watch ``dst``.
+
+        Only needed for custom flows — :meth:`watch_module` discovers
+        edges automatically for module trees.
+        """
         self.registry.connect(src, dst)
+        return self
+
+    def watch_module(self, name: str, module, *, sample_input=None,
+                     trace=None, every: int = 1, param_filter=None) -> "Visualizer":
+        """Watch every parameter of an ``mlx.nn.Module`` tree and capture
+        its architecture automatically by tracing a forward pass.
+
+        With ``sample_input`` (or a ``trace`` callable) the graph is
+        discovered immediately; otherwise the first forward pass the
+        user's own code runs is traced and the instrumentation removes
+        itself.
+        """
+        from .introspect import watch_module as _watch_module
+        _watch_module(self, name, module, sample_input=sample_input,
+                      trace=trace, every=every, param_filter=param_filter)
         return self
 
     # -- lifecycle ------------------------------------------------------------
@@ -198,8 +217,11 @@ class Visualizer:
             matrix, original_shape = adapter.to_numpy_2d(raw)
             snap = take_snapshot(matrix, original_shape, max_side=self.max_side)
         except Exception:
-            log.exception("snapshot failed for %r", w.name)
+            if not w.failing:  # log once per failure streak, retry next tick
+                w.failing = True
+                log.exception("snapshot failed for %r", w.name)
             return None
+        w.failing = False
         if not w.dirty and snap.fingerprint == w.last_fingerprint:
             return None  # unchanged; save bandwidth
         w.last_fingerprint = snap.fingerprint

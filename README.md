@@ -41,18 +41,36 @@ pip install -e .
 
 ## Quick start
 
+For an MLX model, one call watches every parameter **and captures the
+architecture automatically**:
+
 ```python
 from mlx_visualizer import Visualizer
 
 viz = Visualizer()                       # or Visualizer(port=0) for a random port
-viz.watch("weights/w1", lambda: model.w1)          # callables are re-resolved live
-viz.watch("weights/b1", lambda: model.b1, colormap="coolwarm")
-viz.connect("weights/w1", "weights/b1")            # architecture edge
+viz.watch_module("mlp", model)           # watches all params; the first forward
+                                         # pass is traced to discover the graph
 url = viz.start()                        # non-blocking; open the printed URL
 
 ... your training / compute loop runs at full speed ...
 
 viz.stop()
+```
+
+Architecture capture traces a real forward pass: every submodule call is
+recorded, and edges are built by matching output arrays to the inputs of
+later calls — exact dataflow, so branching architectures render as a DAG,
+not a chain (with call-order fallback across functional ops like
+activations). Pass `sample_input=` (or `trace=lambda: model(a, b)`) to
+capture the graph immediately instead of on the first real step; the
+instrumentation removes itself after one pass either way.
+
+Individual arrays and custom flows still work manually:
+
+```python
+viz.watch("weights/w1", lambda: model.w1)          # callables are re-resolved live
+viz.watch("weights/b1", lambda: model.b1, colormap="coolwarm")
+viz.connect("weights/w1", "weights/b1")            # manual architecture edge
 ```
 
 Watch anything: MLX arrays, NumPy arrays, torch tensors, or zero-argument
@@ -73,8 +91,9 @@ Visualizer(host="127.0.0.1", port=8791, *, interval=0.25, max_side=1024,
 | Method | Description |
 | --- | --- |
 | `watch(name, provider, *, group="", colormap="viridis", every=1)` | Track an array or provider callable. `every=N` samples on every Nth tick. |
+| `watch_module(name, module, *, sample_input=None, trace=None, every=1, param_filter=None)` | Watch every parameter of an `mlx.nn.Module` tree and auto-capture its architecture by tracing a forward pass (immediately with `sample_input`/`trace`, otherwise lazily on the first real forward). |
 | `unwatch(name)` | Stop tracking. |
-| `connect(src, dst)` | Declare a dataflow edge for the Architecture view. |
+| `connect(src, dst)` | Declare a dataflow edge manually (custom flows; `watch_module` does this automatically). |
 | `start(open_browser=False)` | Start the worker thread + server; returns the URL. |
 | `stop()` | Shut down. Also usable as a context manager. |
 
@@ -101,8 +120,9 @@ magenta and are counted in the panel stats.
 
 - `examples/basic.py` — live simulation of a 2048² field, its velocity, and a
   4096-element signal.
-- `examples/mlx_training.py` — an MLX MLP with weights, biases, and gradients
-  watched per layer and connected in the Architecture view.
+- `examples/mlx_training.py` — an MLX MLP watched with a single
+  `watch_module` call (architecture auto-captured), plus per-layer
+  gradient watches.
 
 ## Development
 
