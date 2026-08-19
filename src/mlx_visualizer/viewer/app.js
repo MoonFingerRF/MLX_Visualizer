@@ -195,88 +195,228 @@ function panelReady(p) {
   return p.kind === "metric" ? p.historyData.length > 0 : p.texW > 0;
 }
 
-function panelDisplaySize(p) {
-  if (p.kind === "metric") return { w: 280, h: 120 };
-  const sz = (n) => Math.max(36, Math.min(380, 30 + 46 * Math.log10(Math.max(n, 1) + 1)));
-  if (p.rows <= 1) return { w: Math.max(140, sz(p.cols) * 1.6), h: 26 }; // vector strip
-  let w = sz(p.cols), h = sz(p.rows);
-  const ar = w / h;
-  if (ar > 8) w = h * 8;
-  if (ar < 1 / 8) h = w * 8;
+const PANEL_MIN_SIDE = 36;
+const PANEL_MAX_SIDE = 380;
+const PANEL_MAX_ASPECT = 8;
+const GRID_COLUMN_GAP = 26;
+const GRID_ROW_GAP = 52;
+const ARCH_DEPTH_GAP = 72;
+const ARCH_LANE_GAP = 28;
+const ARCH_ITEM_GAP = 46;
+const ARCH_GROUP_GAP = 62;
+
+function matrixDisplaySize(rows, cols) {
+  rows = Math.max(1, Number(rows) || 1);
+  cols = Math.max(1, Number(cols) || 1);
+  const aspect = Math.max(
+    1 / PANEL_MAX_ASPECT,
+    Math.min(PANEL_MAX_ASPECT, cols / rows),
+  );
+  // Preserve the old useful log-scale sizing for square matrices, then
+  // distribute that characteristic size across the true aspect ratio.
+  const characteristic = Math.sqrt(rows * cols);
+  const base = Math.max(
+    PANEL_MIN_SIDE,
+    Math.min(PANEL_MAX_SIDE, 30 + 46 * Math.log10(characteristic + 1)),
+  );
+  let w = base * Math.sqrt(aspect);
+  let h = base / Math.sqrt(aspect);
+  const smaller = Math.min(w, h);
+  if (smaller < PANEL_MIN_SIDE) {
+    const scale = PANEL_MIN_SIDE / smaller;
+    w *= scale;
+    h *= scale;
+  }
+  const larger = Math.max(w, h);
+  if (larger > PANEL_MAX_SIDE) {
+    const scale = PANEL_MAX_SIDE / larger;
+    w *= scale;
+    h *= scale;
+  }
   return { w, h };
 }
 
-function layoutGrid() {
-  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
-  const items = ids.map((id) => ({ p: panels.get(id), ...panelDisplaySize(panels.get(id)) }));
-  items.sort((a, b) => b.h - a.h);
-  const total = items.reduce((s, it) => s + (it.w + 26) * (it.h + 46), 0);
-  const maxW = Math.max(420, Math.sqrt(total) * 1.35);
-  let x = 0, y = 0, shelf = 0;
-  for (const it of items) {
-    if (x > 0 && x + it.w > maxW) { x = 0; y += shelf + 46; shelf = 0; }
-    it.p.x = x; it.p.y = y; it.p.dw = it.w; it.p.dh = it.h;
-    x += it.w + 26;
-    shelf = Math.max(shelf, it.h);
-  }
+function panelDisplaySize(p) {
+  if (p.kind === "metric") return { w: 280, h: 120 };
+  return matrixDisplaySize(p.rows, p.cols);
 }
 
-function layoutGraph() {
+function architectureMetadata(ids) {
+  const idSet = new Set(ids);
   const byName = new Map();
-  for (const p of panels.values()) byName.set(p.name, p);
+  const orderIndex = new Map();
+  panelOrder.forEach((id, index) => {
+    if (!idSet.has(id)) return;
+    const p = panels.get(id);
+    byName.set(p.name, p);
+    orderIndex.set(p.name, index);
+  });
   const adj = new Map(), indeg = new Map();
-  for (const p of panels.values()) { adj.set(p.name, []); indeg.set(p.name, 0); }
+  for (const p of byName.values()) { adj.set(p.name, []); indeg.set(p.name, 0); }
   for (const [s, d] of edges) {
     if (byName.has(s) && byName.has(d)) {
       adj.get(s).push(d);
       indeg.set(d, indeg.get(d) + 1);
     }
   }
-  // Longest-path layering (Kahn order).
-  const depth = new Map(), queue = [];
-  for (const [n, deg] of indeg) { depth.set(n, 0); if (deg === 0) queue.push(n); }
+  // Stable Kahn order plus longest-path depth. Registration order breaks
+  // ties between parallel branches, keeping the layout deterministic.
+  const depth = new Map(), rank = new Map(), queue = [];
+  for (const [name, degree] of indeg) {
+    depth.set(name, 0);
+    if (degree === 0) queue.push(name);
+  }
+  queue.sort((a, b) => orderIndex.get(a) - orderIndex.get(b));
   const indegWork = new Map(indeg);
+  let nextRank = 0;
   while (queue.length) {
     const n = queue.shift();
+    rank.set(n, nextRank++);
     for (const m of adj.get(n)) {
       depth.set(m, Math.max(depth.get(m), depth.get(n) + 1));
       indegWork.set(m, indegWork.get(m) - 1);
-      if (indegWork.get(m) === 0) queue.push(m);
+      if (indegWork.get(m) === 0) {
+        queue.push(m);
+        queue.sort((a, b) => orderIndex.get(a) - orderIndex.get(b));
+      }
     }
   }
-  // Panels that participate in no edge (e.g. biases) sit in the same
-  // column as their group's connected representative instead of piling
-  // into column 0.
-  const connected = new Set();
-  for (const [s, d] of edges) { connected.add(s); connected.add(d); }
-  const groupDepth = new Map();
-  for (const p of panels.values())
-    if (p.group && connected.has(p.name))
-      groupDepth.set(p.group, Math.max(groupDepth.get(p.group) ?? 0, depth.get(p.name) || 0));
-  const cols = new Map();
-  for (const id of panelOrder) {
-    const p = panels.get(id);
-    if (!panelReady(p)) continue;
-    const d = connected.has(p.name)
-      ? (depth.get(p.name) || 0)
-      : (groupDepth.get(p.group) ?? 0);
-    if (!cols.has(d)) cols.set(d, []);
-    cols.get(d).push(p);
+  for (const name of byName.keys()) {
+    if (!rank.has(name)) rank.set(name, nextRank++); // cycle-safe fallback
   }
-  let x = 0;
-  for (const d of [...cols.keys()].sort((a, b) => a - b)) {
-    const column = cols.get(d);
-    let colW = 0, y = 0;
-    const heights = column.map((p) => panelDisplaySize(p));
-    const totalH = heights.reduce((s, sz) => s + sz.h + 56, 0);
-    y = -totalH / 2;
-    column.forEach((p, i) => {
-      const sz = heights[i];
-      p.x = x; p.y = y; p.dw = sz.w; p.dh = sz.h;
-      y += sz.h + 56;
-      colW = Math.max(colW, sz.w);
+
+  const connected = new Set();
+  for (const [s, d] of edges) {
+    if (!byName.has(s) || !byName.has(d)) continue;
+    connected.add(s); connected.add(d);
+  }
+  const groupAnchor = new Map();
+  for (const p of byName.values()) {
+    if (!p.group || !connected.has(p.name)) continue;
+    const candidate = { depth: depth.get(p.name) || 0, rank: rank.get(p.name) };
+    const current = groupAnchor.get(p.group);
+    if (!current || candidate.rank < current.rank) groupAnchor.set(p.group, candidate);
+  }
+  const metadata = new Map();
+  for (const p of byName.values()) {
+    const anchor = groupAnchor.get(p.group);
+    const isAuxiliary = !connected.has(p.name) && !anchor;
+    metadata.set(p.name, {
+      depth: p.kind === "metric" && isAuxiliary
+        ? -1
+        : (connected.has(p.name) ? (depth.get(p.name) || 0) : (anchor?.depth ?? 0)),
+      rank: rank.get(p.name),
+      groupRank: anchor?.rank ?? orderIndex.get(p.name),
+      order: orderIndex.get(p.name),
+      connected: connected.has(p.name),
+      auxiliary: isAuxiliary,
     });
-    x += colW + 150;
+  }
+  return metadata;
+}
+
+function architectureItems(ids) {
+  const metadata = architectureMetadata(ids);
+  const items = ids.map((id) => {
+    const p = panels.get(id);
+    return { p, ...panelDisplaySize(p), ...metadata.get(p.name) };
+  });
+  items.sort((a, b) => a.depth - b.depth ||
+    a.groupRank - b.groupRank || Number(b.connected) - Number(a.connected) ||
+    a.rank - b.rank || a.order - b.order);
+  return items;
+}
+
+function layoutGrid() {
+  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
+  const items = architectureItems(ids);
+  const total = items.reduce(
+    (sum, item) => sum + (item.w + GRID_COLUMN_GAP) * (item.h + GRID_ROW_GAP), 0,
+  );
+  const maxW = Math.max(420, Math.sqrt(total) * 1.3);
+  let x = 0, y = 0, shelf = 0, previousDepth = null, previousKind = null;
+  for (const item of items) {
+    if (x > 0 && previousKind !== null && item.p.kind !== previousKind) {
+      x = 0;
+      y += shelf + GRID_ROW_GAP;
+      shelf = 0;
+    }
+    const depthGap = x > 0 && item.depth !== previousDepth ? 18 : 0;
+    if (x > 0 && x + depthGap + item.w > maxW) {
+      x = 0;
+      y += shelf + GRID_ROW_GAP;
+      shelf = 0;
+    } else {
+      x += depthGap;
+    }
+    item.p.x = x; item.p.y = y; item.p.dw = item.w; item.p.dh = item.h;
+    x += item.w + GRID_COLUMN_GAP;
+    shelf = Math.max(shelf, item.h);
+    previousDepth = item.depth;
+    previousKind = item.p.kind;
+  }
+}
+
+function layoutGraph() {
+  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
+  const items = architectureItems(ids);
+  const columns = new Map();
+  for (const item of items) {
+    if (!columns.has(item.depth)) columns.set(item.depth, []);
+    columns.get(item.depth).push(item);
+  }
+  const footprint = items.reduce(
+    (sum, item) => sum + (item.w + ARCH_LANE_GAP) * (item.h + ARCH_ITEM_GAP), 0,
+  );
+  const targetHeight = Math.max(420, Math.min(820, Math.sqrt(footprint) * 1.05));
+
+  let x = 0;
+  for (const depth of [...columns.keys()].sort((a, b) => a - b)) {
+    const column = columns.get(depth);
+    const groups = [];
+    for (const item of column) {
+      const key = item.p.group || item.p.name;
+      let group = groups[groups.length - 1];
+      if (!group || group.key !== key) {
+        group = { key, items: [], height: 0, width: 0 };
+        groups.push(group);
+      }
+      group.items.push(item);
+      group.height += (group.items.length > 1 ? ARCH_ITEM_GAP : 0) + item.h;
+      group.width = Math.max(group.width, item.w);
+    }
+
+    const lanes = [{ groups: [], height: 0, width: 0 }];
+    for (const group of groups) {
+      let lane = lanes[lanes.length - 1];
+      const addition = (lane.groups.length ? ARCH_GROUP_GAP : 0) + group.height;
+      if (lane.groups.length && lane.height + addition > targetHeight) {
+        lane = { groups: [], height: 0, width: 0 };
+        lanes.push(lane);
+      }
+      lane.height += (lane.groups.length ? ARCH_GROUP_GAP : 0) + group.height;
+      lane.width = Math.max(lane.width, group.width);
+      lane.groups.push(group);
+    }
+
+    let laneX = 0;
+    for (const lane of lanes) {
+      let laneY = -lane.height / 2;
+      lane.groups.forEach((group, groupIndex) => {
+        if (groupIndex) laneY += ARCH_GROUP_GAP;
+        group.items.forEach((item, itemIndex) => {
+          if (itemIndex) laneY += ARCH_ITEM_GAP;
+          item.p.x = x + laneX;
+          item.p.y = laneY;
+          item.p.dw = item.w;
+          item.p.dh = item.h;
+          laneY += item.h;
+        });
+      });
+      laneX += lane.width + ARCH_LANE_GAP;
+    }
+    const blockWidth = laneX - ARCH_LANE_GAP;
+    x += blockWidth + ARCH_DEPTH_GAP;
   }
 }
 
@@ -393,7 +533,7 @@ function positionOverlay() {
     }
     // Compact labels show the complete, wrapped name while fitting inside
     // the row gap. Details return once zoom provides enough room for them.
-    const rowGap = (mode === "grid" ? 46 : 56) * cam.zoom;
+    const rowGap = (mode === "grid" ? GRID_ROW_GAP : ARCH_ITEM_GAP) * cam.zoom;
     const verticalFit = layoutMode === "compact"
       ? Math.max(0.05, (rowGap - 8) / Math.max(p.labelHeight, 1))
       : labelStyle.scale;
@@ -665,14 +805,14 @@ function handleBinary(buf) {
     p.latest = value;
     p.historyData.push(value);
     if (p.historyData.length > p.history) p.historyData.shift();
-    if (firstData) needsLayout = true;
+    if (firstData) { needsLayout = true; needsFit = true; }
     syncLabels();
     return;
   }
   p.image = values.slice(); // keep CPU copy for hover + pool re-allocation
   if (p.layer < 0) p.layer = allocLayer();
   if (p.layer >= 0) uploadLayer(p.layer, meta.w, meta.h, p.image);
-  if (firstData || resized) needsLayout = true;
+  if (firstData || resized) { needsLayout = true; needsFit = true; }
   instDirty = true;
   syncLabels();
 }

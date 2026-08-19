@@ -24,11 +24,11 @@ data costs your computation essentially nothing.
   is drawn with **one instanced WebGL2 draw call**, with colormapping done in
   the fragment shader via a LUT atlas. Rendering cost is independent of how
   many matrices are on screen.
-- **Space-efficient, beautiful layout.** Shelf-packed grid sized by log-scale
-  of tensor dimensions, or an **Architecture** mode that lays tensors out as a
-  layered dataflow graph with edges you declare via `viz.connect(...)`. Labels
-  scale and simplify with zoom, hide before becoming clutter, and wrap without
-  clipping when expanded.
+- **Space-efficient, meaningful layout.** Matrix panels preserve their true
+  row/column aspect ratio (capped at 8:1). The grid follows topological model
+  order and keeps telemetry separate; **Architecture** mode packs busy graph
+  depths into compact group-aware lanes. Labels scale and simplify with zoom,
+  hide before becoming clutter, and wrap without clipping when expanded.
 - **Change-aware streaming.** Frames are fingerprinted (CRC32 of the reduced
   image); unchanged tensors are never re-sent. Slow clients get per-connection
   queues that drop stale frames instead of back-pressuring the pipeline.
