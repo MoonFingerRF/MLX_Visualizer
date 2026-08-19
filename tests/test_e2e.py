@@ -138,3 +138,29 @@ def test_large_matrix_is_downsampled(viz):
         pytest.fail("no snapshot received")
     finally:
         client.close()
+
+
+def test_metric_streams_as_scalar_snapshot(viz):
+    state = {"loss": 2.5}
+    viz.metric("training/loss", lambda: state["loss"], history=25)
+    watch = viz.registry.structure_message()["watches"][0]
+    assert watch["kind"] == "metric"
+    assert watch["history"] == 25
+
+    host, port = _host_port(viz)
+    client = WSClient(host, port)
+    try:
+        client.recv_message()  # hello
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            opcode, payload = client.recv_message()
+            if opcode == 2:
+                meta, image = decode_snapshot(payload)
+                assert meta["name"] == "training/loss"
+                assert meta["shape"] == []
+                assert image.shape == (1, 1)
+                assert image[0, 0] == pytest.approx(2.5)
+                return
+        pytest.fail("no metric snapshot received")
+    finally:
+        client.close()

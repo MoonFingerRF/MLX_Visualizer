@@ -86,6 +86,21 @@ class Visualizer:
         self.registry.watch(name, provider, group=group, colormap=colormap, every=every)
         return self
 
+    def metric(self, name: str, provider: Provider, *, group: str = "",
+               colormap: str = "turbo", every: int = 1,
+               history: int = 512) -> "Visualizer":
+        """Plot a scalar or zero-argument scalar provider as a live series.
+
+        ``history`` controls the maximum number of samples retained by each
+        connected browser. Metric capture uses the same asynchronous,
+        change-aware pipeline as tensor watches.
+        """
+        self.registry.watch(
+            name, provider, group=group, colormap=colormap, every=every,
+            kind="metric", history=history,
+        )
+        return self
+
     def unwatch(self, name: str) -> None:
         self.registry.unwatch(name)
 

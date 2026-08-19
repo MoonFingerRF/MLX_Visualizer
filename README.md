@@ -30,6 +30,9 @@ data costs your computation essentially nothing.
 - **Change-aware streaming.** Frames are fingerprinted (CRC32 of the reduced
   image); unchanged tensors are never re-sent. Slow clients get per-connection
   queues that drop stale frames instead of back-pressuring the pipeline.
+- **Live training metrics.** Scalar providers registered with `viz.metric(...)`
+  render as bounded, real-time line charts alongside tensor heatmaps, using the
+  same asynchronous capture and transport path.
 - **Zero dependencies** beyond NumPy: the HTTP + WebSocket server and the
   binary protocol are built in.
 
@@ -38,6 +41,17 @@ data costs your computation essentially nothing.
 ```bash
 pip install -e .
 ```
+
+For the Shakespeare training notebook (MLX + Jupyter included):
+
+```bash
+pip install -e ".[notebook]"
+mkdir -p data
+cp /path/to/shakespeare.txt data/shakespeare.txt
+jupyter lab examples/shakespeare_transformer.ipynb
+```
+
+The local corpus and generated checkpoints are git-ignored.
 
 ## Quick start
 
@@ -70,6 +84,7 @@ Individual arrays and custom flows still work manually:
 ```python
 viz.watch("weights/w1", lambda: model.w1)          # callables are re-resolved live
 viz.watch("weights/b1", lambda: model.b1, colormap="coolwarm")
+viz.metric("training/loss", lambda: current_loss, history=500)
 viz.connect("weights/w1", "weights/b1")            # manual architecture edge
 ```
 
@@ -91,6 +106,7 @@ Visualizer(host="127.0.0.1", port=8791, *, interval=0.25, max_side=1024,
 | Method | Description |
 | --- | --- |
 | `watch(name, provider, *, group="", colormap="viridis", every=1)` | Track an array or provider callable. `every=N` samples on every Nth tick. |
+| `metric(name, provider, *, group="", colormap="turbo", every=1, history=512)` | Plot a scalar/provider as a bounded live time series. |
 | `watch_module(name, module, *, sample_input=None, trace=None, every=1, param_filter=None)` | Watch every parameter of an `mlx.nn.Module` tree and auto-capture its architecture by tracing a forward pass (immediately with `sample_input`/`trace`, otherwise lazily on the first real forward). |
 | `unwatch(name)` | Stop tracking. |
 | `connect(src, dst)` | Declare a dataflow edge manually (custom flows; `watch_module` does this automatically). |
@@ -123,6 +139,9 @@ magenta and are counted in the panel stats.
 - `examples/mlx_training.py` — an MLX MLP watched with a single
   `watch_module` call (architecture auto-captured), plus per-layer
   gradient watches.
+- `examples/shakespeare_transformer.ipynb` — train and sample a sub-10M
+  character Transformer on a local Shakespeare corpus while watching loss,
+  throughput, and model parameters update live.
 
 ## Development
 

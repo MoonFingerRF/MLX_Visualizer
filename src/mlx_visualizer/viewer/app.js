@@ -48,6 +48,8 @@ function buildLUT() {
 
 // ------------------------------------------------------------------- GL setup
 const canvas = $("gl");
+const metricCanvas = $("metrics");
+const metric2d = metricCanvas.getContext("2d");
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: true });
 if (!gl) $("hud").textContent = "WebGL2 unavailable";
 
@@ -189,7 +191,12 @@ let needsLayout = true, needsFit = true;
 let bytesReceived = 0, frames = 0, lastHud = performance.now(), fps = 0;
 
 // -------------------------------------------------------------------- layout
+function panelReady(p) {
+  return p.kind === "metric" ? p.historyData.length > 0 : p.texW > 0;
+}
+
 function panelDisplaySize(p) {
+  if (p.kind === "metric") return { w: 280, h: 120 };
   const sz = (n) => Math.max(36, Math.min(380, 30 + 46 * Math.log10(Math.max(n, 1) + 1)));
   if (p.rows <= 1) return { w: Math.max(140, sz(p.cols) * 1.6), h: 26 }; // vector strip
   let w = sz(p.cols), h = sz(p.rows);
@@ -200,7 +207,7 @@ function panelDisplaySize(p) {
 }
 
 function layoutGrid() {
-  const ids = panelOrder.filter((id) => panels.get(id).texW > 0);
+  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
   const items = ids.map((id) => ({ p: panels.get(id), ...panelDisplaySize(panels.get(id)) }));
   items.sort((a, b) => b.h - a.h);
   const total = items.reduce((s, it) => s + (it.w + 26) * (it.h + 46), 0);
@@ -249,7 +256,7 @@ function layoutGraph() {
   const cols = new Map();
   for (const id of panelOrder) {
     const p = panels.get(id);
-    if (p.texW <= 0) continue;
+    if (!panelReady(p)) continue;
     const d = connected.has(p.name)
       ? (depth.get(p.name) || 0)
       : (groupDepth.get(p.group) ?? 0);
@@ -300,20 +307,30 @@ function syncLabels() {
     }
     p.labelEl.querySelector(".name").textContent = p.name;
     p.labelEl.querySelector(".group").textContent = p.group ? "· " + p.group : "";
-    p.labelEl.querySelector(".meta").textContent =
-      p.shape ? "(" + p.shape.join("×") + ")" +
-        (p.texW < p.cols || p.texH < p.rows ? "  LOD " + p.texW + "×" + p.texH : "") : "";
-    p.labelEl.querySelector(".stats").textContent = p.shape
-      ? `min ${fmt(p.vmin)}  max ${fmt(p.vmax)}  μ ${fmt(p.mean)}  σ ${fmt(p.std)}` +
-        (p.nan ? `  NaN ${p.nan}` : "")
-      : "";
+    if (p.kind === "metric") {
+      const finite = p.historyData.filter(Number.isFinite);
+      const lo = finite.length ? Math.min(...finite) : NaN;
+      const hi = finite.length ? Math.max(...finite) : NaN;
+      p.labelEl.querySelector(".meta").textContent =
+        `${p.historyData.length}/${p.history} samples`;
+      p.labelEl.querySelector(".stats").textContent =
+        `latest ${fmt(p.latest)}  range ${fmt(lo)}…${fmt(hi)}`;
+    } else {
+      p.labelEl.querySelector(".meta").textContent =
+        p.shape ? "(" + p.shape.join("×") + ")" +
+          (p.texW < p.cols || p.texH < p.rows ? "  LOD " + p.texW + "×" + p.texH : "") : "";
+      p.labelEl.querySelector(".stats").textContent = p.shape
+        ? `min ${fmt(p.vmin)}  max ${fmt(p.vmax)}  μ ${fmt(p.mean)}  σ ${fmt(p.std)}` +
+          (p.nan ? `  NaN ${p.nan}` : "")
+        : "";
+    }
   }
 }
 
 function positionOverlay() {
   for (const p of panels.values()) {
     if (!p.labelEl) continue;
-    if (p.texW <= 0) { p.labelEl.style.display = "none"; continue; }
+    if (!panelReady(p)) { p.labelEl.style.display = "none"; continue; }
     p.labelEl.style.display = "";
     const sx = p.x * cam.zoom + cam.x, sy = p.y * cam.zoom + cam.y;
     p.labelEl.style.transform = `translate(${sx}px, ${sy - 50}px)`;
@@ -327,7 +344,7 @@ function positionOverlay() {
   const seen = new Set();
   for (const [s, d] of edges) {
     const a = byName.get(s), b = byName.get(d);
-    if (!a || !b || a.texW <= 0 || b.texW <= 0) continue;
+    if (!a || !b || !panelReady(a) || !panelReady(b)) continue;
     const key = s + "→" + d;
     seen.add(key);
     let path = edgePaths.get(key);
@@ -347,7 +364,8 @@ function positionOverlay() {
 
 // ------------------------------------------------------------------ instances
 function rebuildInstances() {
-  const live = panelOrder.map((id) => panels.get(id)).filter((p) => p.texW > 0 && p.layer >= 0);
+  const live = panelOrder.map((id) => panels.get(id))
+    .filter((p) => p.kind !== "metric" && p.texW > 0 && p.layer >= 0);
   instCount = live.length;
   if (instData.length < instCount * 10) instData = new Float32Array(instCount * 10 * 2);
   live.forEach((p, i) => {
@@ -369,13 +387,60 @@ function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
     canvas.width = w * dpr; canvas.height = h * dpr;
+    metricCanvas.width = w * dpr; metricCanvas.height = h * dpr;
+  }
+}
+
+function renderMetrics() {
+  const dpr = window.devicePixelRatio || 1;
+  metric2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+  metric2d.clearRect(0, 0, metricCanvas.width / dpr, metricCanvas.height / dpr);
+  for (const p of panels.values()) {
+    if (p.kind !== "metric" || !panelReady(p)) continue;
+    const values = p.historyData;
+    const finite = values.filter(Number.isFinite);
+    if (!finite.length) continue;
+    let lo = Math.min(...finite), hi = Math.max(...finite);
+    if (lo === hi) {
+      const pad = Math.max(Math.abs(lo) * 0.05, 1e-6);
+      lo -= pad; hi += pad;
+    }
+    const x = p.x * cam.zoom + cam.x;
+    const y = p.y * cam.zoom + cam.y;
+    const w = p.dw * cam.zoom;
+    const h = p.dh * cam.zoom;
+    if (w < 2 || h < 2) continue;
+    metric2d.fillStyle = "rgba(19, 24, 38, 0.92)";
+    metric2d.fillRect(x, y, w, h);
+    metric2d.strokeStyle = "rgba(124, 136, 161, 0.20)";
+    metric2d.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      const gy = y + h * i / 4;
+      metric2d.beginPath(); metric2d.moveTo(x, gy); metric2d.lineTo(x + w, gy); metric2d.stroke();
+    }
+    const stops = CMAP_STOPS[p.cmap] || CMAP_STOPS.turbo;
+    const color = stops[Math.floor(stops.length * 0.72)];
+    metric2d.strokeStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+    metric2d.lineWidth = Math.max(1.25, Math.min(2.5, cam.zoom * 1.5));
+    metric2d.beginPath();
+    let drawing = false;
+    values.forEach((value, i) => {
+      if (!Number.isFinite(value)) { drawing = false; return; }
+      const px = x + (values.length === 1 ? w : i * w / (values.length - 1));
+      const py = y + h - (value - lo) / (hi - lo) * h;
+      if (drawing) metric2d.lineTo(px, py);
+      else { metric2d.moveTo(px, py); drawing = true; }
+    });
+    metric2d.stroke();
+    metric2d.strokeStyle = "rgba(90, 208, 177, 0.45)";
+    metric2d.strokeRect(x, y, w, h);
   }
 }
 
 function fitView() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of panels.values()) {
-    if (p.texW <= 0) continue;
+    if (!panelReady(p)) continue;
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y - 50);
     maxX = Math.max(maxX, p.x + p.dw); maxY = Math.max(maxY, p.y + p.dh);
   }
@@ -398,6 +463,7 @@ function render() {
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0.043, 0.055, 0.078, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  renderMetrics();
   gl.useProgram(prog);
   gl.bindVertexArray(vao);
   gl.uniform2f(U.uPan, cam.x, cam.y);
@@ -420,16 +486,19 @@ function render() {
     const mb = bytesReceived / (now - lastHud) * 1000 / 1e6;
     bytesReceived = 0;
     lastHud = now;
-    let cells = 0;
-    for (const p of panels.values()) cells += (p.rows || 0) * (p.cols || 0);
+    let cells = 0, tensorCount = 0, metricCount = 0;
+    for (const p of panels.values()) {
+      if (p.kind === "metric") metricCount++;
+      else { tensorCount++; cells += (p.rows || 0) * (p.cols || 0); }
+    }
     $("hud").textContent =
-      `${panels.size} tensors · ${cells.toLocaleString()} cells · ${mb.toFixed(1)} MB/s · ${fps} fps`;
+      `${tensorCount} tensors · ${metricCount} metrics · ${cells.toLocaleString()} cells · ${mb.toFixed(1)} MB/s · ${fps} fps`;
   }
-  $("empty").hidden = panels.size > 0;
+  $("empty").hidden = instCountEstimate() > 0;
 }
 function instCountEstimate() {
   let n = 0;
-  for (const p of panels.values()) if (p.texW > 0) n++;
+  for (const p of panels.values()) if (panelReady(p)) n++;
   return n;
 }
 requestAnimationFrame(render);
@@ -461,6 +530,8 @@ function handleJSON(msg) {
       let p = panels.get(w.id);
       if (!p) {
         p = { id: w.id, name: w.name, group: w.group, cmap: w.colormap,
+              kind: w.kind || "tensor", history: w.history || 512,
+              historyData: [], latest: null,
               layer: -1, image: null, texW: 0, texH: 0, rows: 0, cols: 0,
               shape: null, vmin: 0, vmax: 1, mean: 0, std: 0, nan: 0,
               x: 0, y: 0, dw: 0, dh: 0, labelEl: null };
@@ -468,6 +539,9 @@ function handleJSON(msg) {
         panelOrder.push(w.id);
       } else {
         p.name = w.name; p.group = w.group; p.cmap = w.colormap;
+        p.kind = w.kind || "tensor"; p.history = w.history || 512;
+        if (p.historyData.length > p.history)
+          p.historyData = p.historyData.slice(-p.history);
       }
     }
     for (const [id, p] of [...panels]) {
@@ -500,7 +574,7 @@ function handleBinary(buf) {
     : new Float32Array(buf.slice(off, off + meta.w * meta.h * 4));
   let p = panels.get(meta.id);
   if (!p) return; // structure message will (re)introduce it
-  const firstData = p.texW === 0;
+  const firstData = !panelReady(p);
   const resized = p.texW !== meta.w || p.texH !== meta.h;
   Object.assign(p, {
     texW: meta.w, texH: meta.h, rows: meta.rows, cols: meta.cols,
@@ -508,6 +582,15 @@ function handleBinary(buf) {
     mean: meta.mean, std: meta.std, nan: meta.nan, cmap: meta.cmap,
     group: meta.group,
   });
+  if (p.kind === "metric") {
+    const value = values.length ? Number(values[0]) : NaN;
+    p.latest = value;
+    p.historyData.push(value);
+    if (p.historyData.length > p.history) p.historyData.shift();
+    if (firstData) needsLayout = true;
+    syncLabels();
+    return;
+  }
   p.image = values.slice(); // keep CPU copy for hover + pool re-allocation
   if (p.layer < 0) p.layer = allocLayer();
   if (p.layer >= 0) uploadLayer(p.layer, meta.w, meta.h, p.image);
@@ -571,11 +654,20 @@ function hover(e) {
   const wy = (e.clientY - rect.top - cam.y) / cam.zoom;
   let hit = null;
   for (const p of panels.values()) {
-    if (p.texW > 0 && wx >= p.x && wx <= p.x + p.dw && wy >= p.y && wy <= p.y + p.dh) {
+    if (panelReady(p) && wx >= p.x && wx <= p.x + p.dw && wy >= p.y && wy <= p.y + p.dh) {
       hit = p; break;
     }
   }
   if (!hit || panning) { tooltip.hidden = true; pickPending = null; return; }
+  if (hit.kind === "metric") {
+    tooltip.hidden = false;
+    tooltip.style.left = (e.clientX - rect.left + 14) + "px";
+    tooltip.style.top = (e.clientY - rect.top + 14) + "px";
+    tooltip.innerHTML =
+      `<div>${hit.name}</div><div class="v">${fmt(hit.latest)}</div>`;
+    pickPending = null;
+    return;
+  }
   const fu = (wx - hit.x) / hit.dw, fv = (wy - hit.y) / hit.dh;
   const row = Math.min(hit.rows - 1, Math.floor(fv * hit.rows));
   const col = Math.min(hit.cols - 1, Math.floor(fu * hit.cols));

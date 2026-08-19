@@ -20,6 +20,8 @@ class Watch:
     provider: Provider
     group: str = ""
     colormap: str = "viridis"
+    kind: str = "tensor"
+    history: int = 512
     every: int = 1  # capture on every Nth tick
     tick: int = 0
     last_fingerprint: Optional[int] = None
@@ -49,7 +51,10 @@ class Registry:
 
     # -- mutation (user thread) -------------------------------------------
     def watch(self, name: str, provider: Provider, *, group: str = "",
-              colormap: str = "viridis", every: int = 1) -> Watch:
+              colormap: str = "viridis", every: int = 1,
+              kind: str = "tensor", history: int = 512) -> Watch:
+        if kind not in {"tensor", "metric"}:
+            raise ValueError("kind must be 'tensor' or 'metric'")
         with self._lock:
             existing = self._watches.get(name)
             if existing is not None:
@@ -57,11 +62,14 @@ class Registry:
                 existing.group = group or existing.group
                 existing.colormap = colormap
                 existing.every = max(1, every)
+                existing.kind = kind
+                existing.history = max(2, int(history))
                 existing.dirty = True
                 self._structure_version += 1
                 return existing
             w = Watch(id=next(_id_counter), name=name, provider=provider,
-                      group=group, colormap=colormap, every=max(1, every))
+                      group=group, colormap=colormap, every=max(1, every),
+                      kind=kind, history=max(2, int(history)))
             self._watches[name] = w
             self._structure_version += 1
             return w
@@ -107,7 +115,8 @@ class Registry:
                 "version": self._structure_version,
                 "watches": [
                     {"id": w.id, "name": w.name, "group": w.group,
-                     "colormap": w.colormap}
+                     "colormap": w.colormap, "kind": w.kind,
+                     "history": w.history}
                     for w in self._watches.values()
                 ],
                 "edges": [[s, d] for s, d in self._graph.edges],

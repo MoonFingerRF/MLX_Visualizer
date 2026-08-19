@@ -13,6 +13,7 @@ __all__ = [
     "downsample",
     "block_mean",
     "watch",
+    "metric",
     "watch_module",
     "connect",
     "start",
@@ -25,6 +26,11 @@ _default: Visualizer = Visualizer()
 def watch(name, provider, **kwargs):
     """Watch an array on the shared default visualizer."""
     return _default.watch(name, provider, **kwargs)
+
+
+def metric(name, provider, **kwargs):
+    """Plot a scalar on the shared default visualizer."""
+    return _default.metric(name, provider, **kwargs)
 
 
 def watch_module(name, module, **kwargs):

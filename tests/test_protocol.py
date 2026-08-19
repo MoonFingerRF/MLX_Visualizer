@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from mlx_visualizer.protocol import decode_snapshot, encode_snapshot
 from mlx_visualizer.registry import Registry
@@ -38,6 +39,26 @@ def test_registry_watch_update_and_graph():
     msg = reg.structure_message()
     assert [w["name"] for w in msg["watches"]] == ["b"]
     assert msg["edges"] == []
+
+
+def test_metric_metadata_and_validation():
+    reg = Registry()
+    metric = reg.watch(
+        "training/loss", lambda: 1.25, kind="metric", history=100,
+        colormap="turbo",
+    )
+    watch = reg.structure_message()["watches"][0]
+    assert metric.kind == "metric"
+    assert watch == {
+        "id": metric.id,
+        "name": "training/loss",
+        "group": "",
+        "colormap": "turbo",
+        "kind": "metric",
+        "history": 100,
+    }
+    with pytest.raises(ValueError):
+        reg.watch("bad", 0.0, kind="histogram")
 
 
 def test_duplicate_edges_are_ignored():

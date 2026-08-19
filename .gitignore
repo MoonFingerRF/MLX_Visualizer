@@ -5,3 +5,7 @@ build/
 dist/
 .venv/
 .pytest_cache/
+graphify-out/
+data/*.txt
+artifacts/
+.ipynb_checkpoints/
