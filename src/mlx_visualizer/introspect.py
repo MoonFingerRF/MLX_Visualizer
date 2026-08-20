@@ -15,10 +15,64 @@ framework whose modules are dicts of arrays with per-class ``__call__``.
 
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 PARAM_COLORMAPS = {"bias": "coolwarm"}
+_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
+
+
+def _semantic_module_metadata(path: str) -> Tuple[str, str, Optional[int]]:
+    """Return a readable label, semantic role, and zero-based layer index.
+
+    MLX deliberately exposes implementation-oriented module names such as
+    ``query_proj`` and ``linear1``. Mapping those names at registration time
+    lets the viewer explain a Transformer without changing the unique watch
+    names used by the protocol and graph edges.
+    """
+    normalized = path.replace("/", ".").strip(".")
+    leaf = normalized.rsplit(".", 1)[-1] if normalized else ""
+    layer_match = _LAYER_RE.search(normalized)
+    layer = int(layer_match.group(1)) if layer_match else None
+    layer_label = f"Layer {layer + 1} · " if layer is not None else ""
+
+    layer_roles = {
+        "query_proj": ("Query", "attention-query"),
+        "key_proj": ("Key", "attention-key"),
+        "value_proj": ("Value", "attention-value"),
+        "out_proj": ("Attention output", "attention-output"),
+        "linear1": ("MLP up", "mlp-up"),
+        "linear2": ("MLP down", "mlp-down"),
+        "ln1": ("Attention norm", "attention-normalization"),
+        "norm1": ("Attention norm", "attention-normalization"),
+        "ln2": ("MLP norm", "mlp-normalization"),
+        "norm2": ("MLP norm", "mlp-normalization"),
+    }
+    if layer is not None and leaf in layer_roles:
+        label, role = layer_roles[leaf]
+        return layer_label + label, role, layer
+
+    root_roles = {
+        "token_embedding": ("Token embedding", "token-embedding"),
+        "position_embedding": ("Position embedding", "position-embedding"),
+        "final_norm": ("Final normalization", "final-normalization"),
+        "output": ("Vocabulary output projection", "vocabulary-output"),
+    }
+    if leaf in root_roles:
+        label, role = root_roles[leaf]
+        return label, role, None
+    if normalized.endswith("transformer.ln"):
+        return "Transformer output normalization", "transformer-normalization", None
+    return "", "", layer
+
+
+def _semantic_parameter_metadata(path: str, key: str) -> Tuple[str, str]:
+    """Readable metadata for one parameter while retaining its full path."""
+    label, role, _layer = _semantic_module_metadata(path)
+    if label and key != "weight":
+        label = f"{label} · {key}"
+    return label, role
 
 
 def _is_array(v: Any) -> bool:
@@ -156,6 +210,74 @@ def _edges_from_records(records: List[Tuple[int, List[Any], List[Any]]]) -> List
     return edges
 
 
+def _semantic_edges_from_records(
+    records: List[Tuple[int, List[Any], List[Any]]],
+    semantics: Dict[int, Tuple[str, Optional[int]]],
+) -> List[Tuple[int, int]]:
+    """Repair functional Transformer branches that module tracing cannot see.
+
+    Attention combines Q, K, and V with array operations rather than a module,
+    so identity tracing can only infer V→output from call order. The three
+    projections are actually parallel inputs to the attention output. Token
+    and position embeddings are likewise added in a functional operation.
+    """
+    edges = list(_edges_from_records(records))
+
+    def remove_if(predicate) -> None:
+        edges[:] = [edge for edge in edges if not predicate(*edge)]
+
+    def add(src: int, dst: int) -> None:
+        if src != dst and (src, dst) not in edges:
+            edges.append((src, dst))
+
+    by_role: Dict[Tuple[str, Optional[int]], List[int]] = {}
+    for module_id, semantic in semantics.items():
+        by_role.setdefault(semantic, []).append(module_id)
+
+    # Embeddings are parallel inputs to the first Transformer operation.
+    embeddings = (
+        by_role.get(("token-embedding", None), []) +
+        by_role.get(("position-embedding", None), [])
+    )
+    if len(embeddings) > 1:
+        embedding_set = set(embeddings)
+        targets = {
+            dst for src, dst in edges
+            if src in embedding_set and dst not in embedding_set
+        }
+        remove_if(lambda src, dst: src in embedding_set and dst in embedding_set)
+        for src in embeddings:
+            for dst in targets:
+                add(src, dst)
+
+    layers = sorted({
+        layer for _role, layer in semantics.values() if layer is not None
+    })
+    for layer in layers:
+        qkv = []
+        for role in ("attention-query", "attention-key", "attention-value"):
+            qkv.extend(by_role.get((role, layer), []))
+        outputs = by_role.get(("attention-output", layer), [])
+        if not qkv:
+            continue
+        qkv_set = set(qkv)
+        output_set = set(outputs)
+        incoming = {
+            src for src, dst in edges if dst in qkv_set and src not in qkv_set
+        }
+        # Sibling projections are parallel, never a Q→K→V chain.
+        remove_if(lambda src, dst: src in qkv_set and dst in qkv_set)
+        for src in incoming:
+            for dst in qkv:
+                add(src, dst)
+        if outputs:
+            remove_if(lambda src, dst: src in qkv_set and dst in output_set)
+            for src in qkv:
+                for dst in outputs:
+                    add(src, dst)
+    return edges
+
+
 def watch_module(
     viz,
     name: str,
@@ -165,6 +287,7 @@ def watch_module(
     trace: Optional[Callable[[], Any]] = None,
     every: int = 1,
     param_filter: Optional[Callable[[str, str], bool]] = None,
+    staged: bool = False,
 ) -> Any:
     """Watch all parameters of a module tree and auto-capture its graph.
 
@@ -185,6 +308,9 @@ def watch_module(
     param_filter:
         Optional ``(module_path, param_name) -> bool`` to select which
         parameters get watched.
+    staged:
+        Register parameters for caller-thread CPU staging. Use this for MLX
+        GPU modules and call ``viz.refresh()`` after parameter updates.
 
     If neither ``sample_input`` nor ``trace`` is given, the module tree
     is instrumented lazily: the first forward pass the user's own code
@@ -198,6 +324,7 @@ def watch_module(
 
     mods = _named_modules(module)
     watched_ids: Dict[int, str] = {}   # id(module) -> representative watch name
+    watched_semantics: Dict[int, Tuple[str, Optional[int]]] = {}
     for path, mod in mods:
         params = _direct_params(mod)
         if not params:
@@ -209,12 +336,17 @@ def watch_module(
                 continue
             watch_name = f"{group}/{key}"
             cmap = PARAM_COLORMAPS.get(key, "viridis")
+            label, role = _semantic_parameter_metadata(path, key)
             viz.watch(watch_name, (lambda m=mod, k=key: m[k]),
-                      group=group, colormap=cmap, every=every)
+                      group=group, label=label, role=role, colormap=cmap,
+                      every=every, staged=staged)
             if rep is None or key == "weight":
                 rep = watch_name
         if rep is not None:
             watched_ids[id(mod)] = rep
+            _label, role, layer = _semantic_module_metadata(path)
+            if role:
+                watched_semantics[id(mod)] = (role, layer)
 
     # Evaluate MLX parameters once on the caller's thread so the initial
     # weights are immediately snapshottable (fresh modules hold lazy
@@ -229,7 +361,9 @@ def watch_module(
         return viz  # nothing to connect
 
     def on_done(records):
-        for src_id, dst_id in _edges_from_records(records):
+        for src_id, dst_id in _semantic_edges_from_records(
+            records, watched_semantics,
+        ):
             viz.connect(watched_ids[src_id], watched_ids[dst_id])
 
     tracer = _Tracer([m for _, m in mods], watched_ids, on_done)

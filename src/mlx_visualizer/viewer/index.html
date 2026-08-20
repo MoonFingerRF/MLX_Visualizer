@@ -11,7 +11,7 @@
 <header id="topbar">
   <div id="brand">MLX <span>Visualizer</span></div>
   <div id="controls">
-    <button id="mode-grid" class="mode active" title="Packed grid layout">Grid</button>
+    <button id="mode-grid" class="mode active" title="Architecture-aware packed grid">Grid</button>
     <button id="mode-graph" class="mode" title="Architecture graph layout">Architecture</button>
     <select id="cmap-override" title="Colormap override">
       <option value="">per-tensor colormap</option>
@@ -31,6 +31,7 @@
 </header>
 <main id="stage">
   <canvas id="gl"></canvas>
+  <canvas id="metrics"></canvas>
   <div id="world">
     <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="labels"></div>

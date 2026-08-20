@@ -1,8 +1,8 @@
 """Array backend adapter.
 
 Accepts MLX arrays, NumPy arrays, torch tensors, or anything exposing
-``__array__`` / ``tolist``. All conversion happens on the visualizer's
-worker thread so the caller's compute path is never blocked by it.
+``__array__`` / ``tolist``. Normal watches convert on the visualizer worker;
+staged MLX watches convert cooperatively on their owning compute thread.
 """
 
 from __future__ import annotations
@@ -25,13 +25,10 @@ def resolve(provider: Provider) -> ArrayLike:
 def _ensure_evaluated(x: ArrayLike) -> None:
     """Force evaluation of MLX lazy arrays before touching their buffer.
 
-    On builds where compute streams are thread-local (e.g. the Linux CPU
-    build), evaluating a foreign thread's lazy graph raises a catchable
-    RuntimeError from ``mx.eval`` — but converting it with ``np.asarray``
-    directly would hard-abort the process. Calling ``mx.eval`` first turns
-    the dangerous case into a skippable error; for already-evaluated
-    arrays (e.g. after the standard ``mx.eval(model.parameters())`` in a
-    training step) it is a safe no-op everywhere.
+    Evaluating a foreign thread's graph raises a catchable RuntimeError from
+    ``mx.eval`` on platforms where compute streams are thread-local, while
+    converting it with ``np.asarray`` directly can hard-abort the process.
+    Calling ``mx.eval`` first turns the dangerous case into a skippable error.
     """
     if type(x).__module__.split(".")[0] == "mlx":
         import mlx.core as mx
@@ -40,9 +37,9 @@ def _ensure_evaluated(x: ArrayLike) -> None:
             mx.eval(x)
         except RuntimeError as exc:
             raise RuntimeError(
-                "cannot evaluate a lazy MLX array from the visualizer "
-                "thread on this platform; call mx.eval() on it in your "
-                "compute loop first"
+                "cannot access this MLX array from the visualizer worker; "
+                "register it with staged=True and call viz.refresh() on "
+                "the MLX compute thread"
             ) from exc
 
 

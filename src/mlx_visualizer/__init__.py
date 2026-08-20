@@ -13,8 +13,10 @@ __all__ = [
     "downsample",
     "block_mean",
     "watch",
+    "metric",
     "watch_module",
     "connect",
+    "refresh",
     "start",
     "stop",
 ]
@@ -27,6 +29,11 @@ def watch(name, provider, **kwargs):
     return _default.watch(name, provider, **kwargs)
 
 
+def metric(name, provider, **kwargs):
+    """Plot a scalar on the shared default visualizer."""
+    return _default.metric(name, provider, **kwargs)
+
+
 def watch_module(name, module, **kwargs):
     """Watch a whole module tree (auto-captures its architecture) on the
     shared default visualizer."""
@@ -36,6 +43,11 @@ def watch_module(name, module, **kwargs):
 def connect(src: str, dst: str):
     """Add an architecture edge on the shared default visualizer."""
     return _default.connect(src, dst)
+
+
+def refresh():
+    """Refresh caller-thread CPU copies for staged watches."""
+    return _default.refresh()
 
 
 def start(**kwargs) -> str:

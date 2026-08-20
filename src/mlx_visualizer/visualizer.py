@@ -1,11 +1,10 @@
 """Public entry point: the :class:`Visualizer`.
 
 The visualizer owns one background thread running an asyncio event loop.
-That loop hosts the HTTP/WebSocket server and the capture task. The
-user's compute thread only ever touches the registry (a dict update
-behind a lock), so watching arrays adds essentially zero overhead to the
-computation itself; all conversion, reduction, encoding, and network I/O
-happen on the worker.
+That loop hosts the HTTP/WebSocket server and the capture task. Normal
+conversion, reduction, encoding, and network I/O happen on the worker.
+MLX GPU watches use :meth:`Visualizer.refresh` to stage a CPU copy on the
+owning compute thread because MLX streams are thread-local.
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ import threading
 import time
 import webbrowser
 from typing import Optional
+
+import numpy as np
 
 from . import adapter
 from .adapter import Provider
@@ -81,9 +82,35 @@ class Visualizer:
 
     # -- registration (any thread) ------------------------------------------
     def watch(self, name: str, provider: Provider, *, group: str = "",
-              colormap: str = "viridis", every: int = 1) -> "Visualizer":
-        """Track an array or a zero-argument callable returning one."""
-        self.registry.watch(name, provider, group=group, colormap=colormap, every=every)
+              label: str = "", role: str = "",
+              colormap: str = "viridis", every: int = 1,
+              staged: bool = False) -> "Visualizer":
+        """Track an array or a zero-argument callable returning one.
+
+        Set ``staged=True`` for MLX GPU arrays, then call :meth:`refresh`
+        from the compute thread after updates. The worker will only touch
+        the resulting CPU copy, avoiding cross-thread GPU stream access.
+        """
+        self.registry.watch(
+            name, provider, group=group, label=label, role=role,
+            colormap=colormap, every=every, staged=staged,
+        )
+        return self
+
+    def metric(self, name: str, provider: Provider, *, group: str = "",
+               colormap: str = "turbo", every: int = 1,
+               history: int = 512, staged: bool = False) -> "Visualizer":
+        """Plot a scalar or zero-argument scalar provider as a live series.
+
+        ``history`` controls the maximum number of samples retained by each
+        connected browser. Metric capture uses the same asynchronous,
+        change-aware pipeline as tensor watches. Use ``staged=True`` when the
+        provider returns an MLX GPU scalar, then update it with :meth:`refresh`.
+        """
+        self.registry.watch(
+            name, provider, group=group, colormap=colormap, every=every,
+            kind="metric", history=history, staged=staged,
+        )
         return self
 
     def unwatch(self, name: str) -> None:
@@ -99,7 +126,8 @@ class Visualizer:
         return self
 
     def watch_module(self, name: str, module, *, sample_input=None,
-                     trace=None, every: int = 1, param_filter=None) -> "Visualizer":
+                     trace=None, every: int = 1, param_filter=None,
+                     staged: bool = False) -> "Visualizer":
         """Watch every parameter of an ``mlx.nn.Module`` tree and capture
         its architecture automatically by tracing a forward pass.
 
@@ -110,7 +138,35 @@ class Visualizer:
         """
         from .introspect import watch_module as _watch_module
         _watch_module(self, name, module, sample_input=sample_input,
-                      trace=trace, every=every, param_filter=param_filter)
+                      trace=trace, every=every, param_filter=param_filter,
+                      staged=staged)
+        if staged:
+            self.refresh()
+        return self
+
+    def refresh(self) -> "Visualizer":
+        """Stage fresh CPU copies for all watches registered as staged.
+
+        Call this method on the thread that owns the watched MLX arrays,
+        normally immediately after ``mx.eval(model.parameters(), ...)``.
+        Copies are swapped atomically, so the background snapshot worker can
+        safely finish reading the previous version while training continues.
+        """
+        for watch in self.registry.items():
+            if not watch.staged:
+                continue
+            try:
+                raw = adapter.resolve(watch.provider)
+                matrix, original_shape = adapter.to_numpy_2d(raw)
+                staged_matrix = np.array(
+                    matrix, dtype=np.float32, order="C", copy=True,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to stage visualizer watch {watch.name!r} on "
+                    "the calling thread"
+                ) from exc
+            self.registry.set_staged(watch.name, staged_matrix, original_shape)
         return self
 
     # -- lifecycle ------------------------------------------------------------
@@ -213,8 +269,13 @@ class Visualizer:
     def _snapshot_one(self, w) -> Optional[bytes]:
         """Runs on the default executor: resolve → reduce → encode."""
         try:
-            raw = adapter.resolve(w.provider)
-            matrix, original_shape = adapter.to_numpy_2d(raw)
+            if w.staged:
+                matrix, original_shape = self.registry.staged_data(w.id)
+                if matrix is None or original_shape is None:
+                    return None
+            else:
+                raw = adapter.resolve(w.provider)
+                matrix, original_shape = adapter.to_numpy_2d(raw)
             snap = take_snapshot(matrix, original_shape, max_side=self.max_side)
         except Exception:
             if not w.failing:  # log once per failure streak, retry next tick
@@ -231,6 +292,9 @@ class Visualizer:
 
     # -- client messages ---------------------------------------------------------
     def _hello(self) -> dict:
+        # Fingerprints are global, but a newly joined/reloaded browser has no
+        # textures yet. Force one frame per watch so it can reconstruct them.
+        self.registry.mark_all_dirty()
         msg = self.registry.structure_message()
         msg["type"] = "hello"
         msg["interval"] = self.interval
@@ -243,10 +307,15 @@ class Visualizer:
             watch = self.registry.get(int(obj.get("id", -1)))
             if watch is None:
                 return
+            provider = watch.provider
+            if watch.staged:
+                provider, _shape = self.registry.staged_data(watch.id)
+                if provider is None:
+                    return
             loop = asyncio.get_event_loop()
             try:
                 value = await loop.run_in_executor(
-                    None, adapter.pick_value, watch.provider,
+                    None, adapter.pick_value, provider,
                     int(obj.get("row", 0)), int(obj.get("col", 0)))
             except Exception:
                 return

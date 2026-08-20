@@ -19,6 +19,12 @@ function fmt(x) {
   return +x.toFixed(4) + "";
 }
 
+function escapeHTML(text) {
+  const el = document.createElement("span");
+  el.textContent = String(text);
+  return el.innerHTML;
+}
+
 // ------------------------------------------------------------------ colormaps
 const CMAP_STOPS = {
   viridis: [[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]],
@@ -48,6 +54,8 @@ function buildLUT() {
 
 // ------------------------------------------------------------------- GL setup
 const canvas = $("gl");
+const metricCanvas = $("metrics");
+const metric2d = metricCanvas.getContext("2d");
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: true });
 if (!gl) $("hud").textContent = "WebGL2 unavailable";
 
@@ -189,87 +197,243 @@ let needsLayout = true, needsFit = true;
 let bytesReceived = 0, frames = 0, lastHud = performance.now(), fps = 0;
 
 // -------------------------------------------------------------------- layout
-function panelDisplaySize(p) {
-  const sz = (n) => Math.max(36, Math.min(380, 30 + 46 * Math.log10(Math.max(n, 1) + 1)));
-  if (p.rows <= 1) return { w: Math.max(140, sz(p.cols) * 1.6), h: 26 }; // vector strip
-  let w = sz(p.cols), h = sz(p.rows);
-  const ar = w / h;
-  if (ar > 8) w = h * 8;
-  if (ar < 1 / 8) h = w * 8;
+function panelReady(p) {
+  return p.kind === "metric" ? p.historyData.length > 0 : p.texW > 0;
+}
+
+const PANEL_MIN_SIDE = 36;
+const PANEL_MAX_SIDE = 380;
+const PANEL_MAX_ASPECT = 8;
+const GRID_COLUMN_GAP = 26;
+const GRID_ROW_GAP = 52;
+const ARCH_DEPTH_GAP = 72;
+const ARCH_LANE_GAP = 28;
+const ARCH_ITEM_GAP = 46;
+const ARCH_GROUP_GAP = 62;
+
+function matrixDisplaySize(rows, cols) {
+  rows = Math.max(1, Number(rows) || 1);
+  cols = Math.max(1, Number(cols) || 1);
+  const aspect = Math.max(
+    1 / PANEL_MAX_ASPECT,
+    Math.min(PANEL_MAX_ASPECT, cols / rows),
+  );
+  // Preserve the old useful log-scale sizing for square matrices, then
+  // distribute that characteristic size across the true aspect ratio.
+  const characteristic = Math.sqrt(rows * cols);
+  const base = Math.max(
+    PANEL_MIN_SIDE,
+    Math.min(PANEL_MAX_SIDE, 30 + 46 * Math.log10(characteristic + 1)),
+  );
+  let w = base * Math.sqrt(aspect);
+  let h = base / Math.sqrt(aspect);
+  const smaller = Math.min(w, h);
+  if (smaller < PANEL_MIN_SIDE) {
+    const scale = PANEL_MIN_SIDE / smaller;
+    w *= scale;
+    h *= scale;
+  }
+  const larger = Math.max(w, h);
+  if (larger > PANEL_MAX_SIDE) {
+    const scale = PANEL_MAX_SIDE / larger;
+    w *= scale;
+    h *= scale;
+  }
   return { w, h };
 }
 
-function layoutGrid() {
-  const ids = panelOrder.filter((id) => panels.get(id).texW > 0);
-  const items = ids.map((id) => ({ p: panels.get(id), ...panelDisplaySize(panels.get(id)) }));
-  items.sort((a, b) => b.h - a.h);
-  const total = items.reduce((s, it) => s + (it.w + 26) * (it.h + 46), 0);
-  const maxW = Math.max(420, Math.sqrt(total) * 1.35);
-  let x = 0, y = 0, shelf = 0;
-  for (const it of items) {
-    if (x > 0 && x + it.w > maxW) { x = 0; y += shelf + 46; shelf = 0; }
-    it.p.x = x; it.p.y = y; it.p.dw = it.w; it.p.dh = it.h;
-    x += it.w + 26;
-    shelf = Math.max(shelf, it.h);
-  }
+function panelDisplaySize(p) {
+  if (p.kind === "metric") return { w: 280, h: 120 };
+  return matrixDisplaySize(p.rows, p.cols);
 }
 
-function layoutGraph() {
+function architectureMetadata(ids) {
+  const idSet = new Set(ids);
   const byName = new Map();
-  for (const p of panels.values()) byName.set(p.name, p);
+  const orderIndex = new Map();
+  panelOrder.forEach((id, index) => {
+    if (!idSet.has(id)) return;
+    const p = panels.get(id);
+    byName.set(p.name, p);
+    orderIndex.set(p.name, index);
+  });
   const adj = new Map(), indeg = new Map();
-  for (const p of panels.values()) { adj.set(p.name, []); indeg.set(p.name, 0); }
+  for (const p of byName.values()) { adj.set(p.name, []); indeg.set(p.name, 0); }
   for (const [s, d] of edges) {
     if (byName.has(s) && byName.has(d)) {
       adj.get(s).push(d);
       indeg.set(d, indeg.get(d) + 1);
     }
   }
-  // Longest-path layering (Kahn order).
-  const depth = new Map(), queue = [];
-  for (const [n, deg] of indeg) { depth.set(n, 0); if (deg === 0) queue.push(n); }
+  // Stable Kahn order plus longest-path depth. Registration order breaks
+  // ties between parallel branches, keeping the layout deterministic.
+  const depth = new Map(), rank = new Map(), queue = [];
+  for (const [name, degree] of indeg) {
+    depth.set(name, 0);
+    if (degree === 0) queue.push(name);
+  }
+  queue.sort((a, b) => orderIndex.get(a) - orderIndex.get(b));
   const indegWork = new Map(indeg);
+  let nextRank = 0;
   while (queue.length) {
     const n = queue.shift();
+    rank.set(n, nextRank++);
     for (const m of adj.get(n)) {
       depth.set(m, Math.max(depth.get(m), depth.get(n) + 1));
       indegWork.set(m, indegWork.get(m) - 1);
-      if (indegWork.get(m) === 0) queue.push(m);
+      if (indegWork.get(m) === 0) {
+        queue.push(m);
+        queue.sort((a, b) => orderIndex.get(a) - orderIndex.get(b));
+      }
     }
   }
-  // Panels that participate in no edge (e.g. biases) sit in the same
-  // column as their group's connected representative instead of piling
-  // into column 0.
-  const connected = new Set();
-  for (const [s, d] of edges) { connected.add(s); connected.add(d); }
-  const groupDepth = new Map();
-  for (const p of panels.values())
-    if (p.group && connected.has(p.name))
-      groupDepth.set(p.group, Math.max(groupDepth.get(p.group) ?? 0, depth.get(p.name) || 0));
-  const cols = new Map();
-  for (const id of panelOrder) {
-    const p = panels.get(id);
-    if (p.texW <= 0) continue;
-    const d = connected.has(p.name)
-      ? (depth.get(p.name) || 0)
-      : (groupDepth.get(p.group) ?? 0);
-    if (!cols.has(d)) cols.set(d, []);
-    cols.get(d).push(p);
+  for (const name of byName.keys()) {
+    if (!rank.has(name)) rank.set(name, nextRank++); // cycle-safe fallback
   }
-  let x = 0;
-  for (const d of [...cols.keys()].sort((a, b) => a - b)) {
-    const column = cols.get(d);
-    let colW = 0, y = 0;
-    const heights = column.map((p) => panelDisplaySize(p));
-    const totalH = heights.reduce((s, sz) => s + sz.h + 56, 0);
-    y = -totalH / 2;
-    column.forEach((p, i) => {
-      const sz = heights[i];
-      p.x = x; p.y = y; p.dw = sz.w; p.dh = sz.h;
-      y += sz.h + 56;
-      colW = Math.max(colW, sz.w);
+
+  const connected = new Set();
+  for (const [s, d] of edges) {
+    if (!byName.has(s) || !byName.has(d)) continue;
+    connected.add(s); connected.add(d);
+  }
+  const groupAnchor = new Map();
+  for (const p of byName.values()) {
+    if (!p.group || !connected.has(p.name)) continue;
+    const candidate = { depth: depth.get(p.name) || 0, rank: rank.get(p.name) };
+    const current = groupAnchor.get(p.group);
+    if (!current || candidate.rank < current.rank) groupAnchor.set(p.group, candidate);
+  }
+  const metadata = new Map();
+  for (const p of byName.values()) {
+    const anchor = groupAnchor.get(p.group);
+    const isAuxiliary = !connected.has(p.name) && !anchor;
+    metadata.set(p.name, {
+      depth: p.kind === "metric" && isAuxiliary
+        ? -1
+        : (connected.has(p.name) ? (depth.get(p.name) || 0) : (anchor?.depth ?? 0)),
+      rank: rank.get(p.name),
+      groupRank: anchor?.rank ?? orderIndex.get(p.name),
+      order: orderIndex.get(p.name),
+      connected: connected.has(p.name),
+      auxiliary: isAuxiliary,
     });
-    x += colW + 150;
+  }
+  return metadata;
+}
+
+function architectureItems(ids) {
+  const metadata = architectureMetadata(ids);
+  const items = ids.map((id) => {
+    const p = panels.get(id);
+    return { p, ...panelDisplaySize(p), ...metadata.get(p.name) };
+  });
+  const roleOrder = {
+    "token-embedding": 0, "position-embedding": 1,
+    "attention-normalization": 10,
+    "attention-query": 11, "attention-key": 12, "attention-value": 13,
+    "attention-output": 14, "mlp-normalization": 20,
+    "mlp-up": 21, "mlp-down": 22,
+    "transformer-normalization": 30, "final-normalization": 31,
+    "vocabulary-output": 32,
+  };
+  const semanticRank = (item) => roleOrder[item.p.role] ?? 100;
+  items.sort((a, b) => a.depth - b.depth ||
+    semanticRank(a) - semanticRank(b) ||
+    a.groupRank - b.groupRank || Number(b.connected) - Number(a.connected) ||
+    a.rank - b.rank || a.order - b.order);
+  return items;
+}
+
+function layoutGrid() {
+  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
+  const items = architectureItems(ids);
+  const total = items.reduce(
+    (sum, item) => sum + (item.w + GRID_COLUMN_GAP) * (item.h + GRID_ROW_GAP), 0,
+  );
+  const maxW = Math.max(420, Math.sqrt(total) * 1.3);
+  let x = 0, y = 0, shelf = 0, previousDepth = null, previousKind = null;
+  for (const item of items) {
+    if (x > 0 && previousKind !== null && item.p.kind !== previousKind) {
+      x = 0;
+      y += shelf + GRID_ROW_GAP;
+      shelf = 0;
+    }
+    const depthGap = x > 0 && item.depth !== previousDepth ? 18 : 0;
+    if (x > 0 && x + depthGap + item.w > maxW) {
+      x = 0;
+      y += shelf + GRID_ROW_GAP;
+      shelf = 0;
+    } else {
+      x += depthGap;
+    }
+    item.p.x = x; item.p.y = y; item.p.dw = item.w; item.p.dh = item.h;
+    x += item.w + GRID_COLUMN_GAP;
+    shelf = Math.max(shelf, item.h);
+    previousDepth = item.depth;
+    previousKind = item.p.kind;
+  }
+}
+
+function layoutGraph() {
+  const ids = panelOrder.filter((id) => panelReady(panels.get(id)));
+  const items = architectureItems(ids);
+  const columns = new Map();
+  for (const item of items) {
+    if (!columns.has(item.depth)) columns.set(item.depth, []);
+    columns.get(item.depth).push(item);
+  }
+  const footprint = items.reduce(
+    (sum, item) => sum + (item.w + ARCH_LANE_GAP) * (item.h + ARCH_ITEM_GAP), 0,
+  );
+  const targetHeight = Math.max(420, Math.min(820, Math.sqrt(footprint) * 1.05));
+
+  let x = 0;
+  for (const depth of [...columns.keys()].sort((a, b) => a - b)) {
+    const column = columns.get(depth);
+    const groups = [];
+    for (const item of column) {
+      const key = item.p.group || item.p.name;
+      let group = groups[groups.length - 1];
+      if (!group || group.key !== key) {
+        group = { key, items: [], height: 0, width: 0 };
+        groups.push(group);
+      }
+      group.items.push(item);
+      group.height += (group.items.length > 1 ? ARCH_ITEM_GAP : 0) + item.h;
+      group.width = Math.max(group.width, item.w);
+    }
+
+    const lanes = [{ groups: [], height: 0, width: 0 }];
+    for (const group of groups) {
+      let lane = lanes[lanes.length - 1];
+      const addition = (lane.groups.length ? ARCH_GROUP_GAP : 0) + group.height;
+      if (lane.groups.length && lane.height + addition > targetHeight) {
+        lane = { groups: [], height: 0, width: 0 };
+        lanes.push(lane);
+      }
+      lane.height += (lane.groups.length ? ARCH_GROUP_GAP : 0) + group.height;
+      lane.width = Math.max(lane.width, group.width);
+      lane.groups.push(group);
+    }
+
+    let laneX = 0;
+    for (const lane of lanes) {
+      let laneY = -lane.height / 2;
+      lane.groups.forEach((group, groupIndex) => {
+        if (groupIndex) laneY += ARCH_GROUP_GAP;
+        group.items.forEach((item, itemIndex) => {
+          if (itemIndex) laneY += ARCH_ITEM_GAP;
+          item.p.x = x + laneX;
+          item.p.y = laneY;
+          item.p.dw = item.w;
+          item.p.dh = item.h;
+          laneY += item.h;
+        });
+      });
+      laneX += lane.width + ARCH_LANE_GAP;
+    }
+    const blockWidth = laneX - ARCH_LANE_GAP;
+    x += blockWidth + ARCH_DEPTH_GAP;
   }
 }
 
@@ -282,11 +446,43 @@ function relayout() {
 
 // ------------------------------------------------------------ DOM labels/edges
 const labelsEl = $("labels"), edgesEl = $("edges");
+const LABEL_HIDE_ZOOM = 0.18;
+const LABEL_FADE_ZOOM = 0.48;
+const LABEL_MIN_SCALE = 0.4;
+const LABEL_MAX_SCALE = 1.75;
+const LABEL_READABLE_SCALE = 0.48;
 edgesEl.innerHTML =
   '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
   'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
   '<path d="M0,0 L10,5 L0,10 z" fill="#5ad0b1" fill-opacity="0.6"/></marker></defs>';
 const edgePaths = new Map();
+const ROLE_BADGES = {
+  "token-embedding": "TOKEN", "position-embedding": "POSITION",
+  "attention-normalization": "NORM",
+  "attention-query": "Q", "attention-key": "K", "attention-value": "V",
+  "attention-output": "ATTN OUT", "mlp-normalization": "NORM",
+  "mlp-up": "MLP ↑", "mlp-down": "MLP ↓",
+  "transformer-normalization": "NORM", "final-normalization": "NORM",
+  "vocabulary-output": "LOGITS",
+};
+
+function breakableLabel(text) {
+  return text.replaceAll("/", "/\u200b").replaceAll(".", ".\u200b");
+}
+
+function labelStyleForZoom(zoom) {
+  const scale = Math.max(
+    LABEL_MIN_SCALE,
+    Math.min(LABEL_MAX_SCALE, Math.pow(zoom, 0.65)),
+  );
+  const fade = Math.max(0, Math.min(
+    1,
+    (zoom - LABEL_HIDE_ZOOM) / (LABEL_FADE_ZOOM - LABEL_HIDE_ZOOM),
+  ));
+  // Smoothstep keeps labels from popping in as the user zooms.
+  const opacity = fade * fade * (3 - 2 * fade);
+  return { scale, opacity, hidden: zoom <= LABEL_HIDE_ZOOM };
+}
 
 function syncLabels() {
   for (const p of panels.values()) {
@@ -294,30 +490,114 @@ function syncLabels() {
       p.labelEl = document.createElement("div");
       p.labelEl.className = "label";
       p.labelEl.innerHTML =
-        '<div><span class="name"></span> <span class="group"></span></div>' +
+        '<div class="title"><span class="role"></span><span class="name"></span>' +
+        ' <span class="group"></span></div><div class="path"></div>' +
         '<div class="meta"></div><div class="stats"></div>';
       labelsEl.appendChild(p.labelEl);
     }
-    p.labelEl.querySelector(".name").textContent = p.name;
-    p.labelEl.querySelector(".group").textContent = p.group ? "· " + p.group : "";
-    p.labelEl.querySelector(".meta").textContent =
-      p.shape ? "(" + p.shape.join("×") + ")" +
+    const displayName = p.label || p.name;
+    const roleText = ROLE_BADGES[p.role] || "";
+    const pathText = p.label ? p.name : "";
+    const groupText = !p.label && p.group ? "· " + p.group : "";
+    let metaText, statsText;
+    if (p.kind === "metric") {
+      const finite = p.historyData.filter(Number.isFinite);
+      const lo = finite.length ? Math.min(...finite) : NaN;
+      const hi = finite.length ? Math.max(...finite) : NaN;
+      metaText = `${p.historyData.length}/${p.history} samples`;
+      statsText = `latest ${fmt(p.latest)}  range ${fmt(lo)}…${fmt(hi)}`;
+    } else {
+      metaText = p.shape ? "(" + p.shape.join("×") + ")" +
         (p.texW < p.cols || p.texH < p.rows ? "  LOD " + p.texW + "×" + p.texH : "") : "";
-    p.labelEl.querySelector(".stats").textContent = p.shape
-      ? `min ${fmt(p.vmin)}  max ${fmt(p.vmax)}  μ ${fmt(p.mean)}  σ ${fmt(p.std)}` +
-        (p.nan ? `  NaN ${p.nan}` : "")
-      : "";
+      statsText = p.shape
+        ? `min ${fmt(p.vmin)}  max ${fmt(p.vmax)}  μ ${fmt(p.mean)}  σ ${fmt(p.std)}` +
+          (p.nan ? `  NaN ${p.nan}` : "")
+        : "";
+    }
+    const signature = `${displayName}\0${p.role}\0${pathText}\0${groupText}\0${metaText}\0${statsText}`;
+    if (p.labelSignature === signature) continue;
+    const roleEl = p.labelEl.querySelector(".role");
+    roleEl.textContent = roleText;
+    roleEl.dataset.role = p.role || "";
+    p.labelEl.querySelector(".name").textContent = breakableLabel(displayName);
+    p.labelEl.querySelector(".group").textContent = groupText;
+    p.labelEl.querySelector(".path").textContent = breakableLabel(pathText);
+    p.labelEl.querySelector(".meta").textContent = metaText;
+    p.labelEl.querySelector(".stats").textContent = statsText;
+    p.labelSignature = signature;
+    p.labelSizeDirty = true;
   }
 }
 
 function positionOverlay() {
+  const labelStyle = labelStyleForZoom(cam.zoom);
+  const viewWidth = canvas.clientWidth, viewHeight = canvas.clientHeight;
   for (const p of panels.values()) {
     if (!p.labelEl) continue;
-    if (p.texW <= 0) { p.labelEl.style.display = "none"; continue; }
-    p.labelEl.style.display = "";
     const sx = p.x * cam.zoom + cam.x, sy = p.y * cam.zoom + cam.y;
-    p.labelEl.style.transform = `translate(${sx}px, ${sy - 50}px)`;
-    p.labelEl.style.maxWidth = Math.max(150, p.dw * cam.zoom) + "px";
+    const panelWidth = p.dw * cam.zoom, panelHeight = p.dh * cam.zoom;
+    const visibleWidth = Math.max(
+      0, Math.min(sx + panelWidth, viewWidth) - Math.max(sx, 0),
+    );
+    const visibleHeight = Math.max(
+      0, Math.min(sy + panelHeight, viewHeight) - Math.max(sy, 0),
+    );
+    // Do not pin the label of a mostly off-screen panel over its neighbor.
+    // It appears as soon as the user pans that panel substantially into view.
+    const panelVisible = visibleWidth >= panelWidth * 0.9 &&
+      visibleHeight >= panelHeight * 0.5;
+    if (!panelReady(p) || labelStyle.hidden || !panelVisible) {
+      p.labelEl.style.display = "none";
+      continue;
+    }
+    p.labelEl.style.display = "";
+    const layoutMode = cam.zoom >= 2.25 ? "detailed" : "compact";
+    const badgeOnly = layoutMode === "compact" && panelWidth < 110 &&
+      ["attention-output", "mlp-up", "mlp-down"].includes(p.role);
+    const labelWidth = Math.max(
+      48,
+      (layoutMode === "compact" ? panelWidth - 8 : panelWidth) / labelStyle.scale,
+    );
+    const layoutKey = `${layoutMode}:${badgeOnly}:${labelWidth.toFixed(2)}`;
+    if (p.labelLayoutKey !== layoutKey) {
+      p.labelEl.classList.toggle("compact", layoutMode === "compact");
+      p.labelEl.classList.toggle("badge-only", badgeOnly);
+      p.labelEl.style.width = `${labelWidth}px`;
+      p.labelLayoutKey = layoutKey;
+      p.labelSizeDirty = true;
+    }
+    if (p.labelSizeDirty || !p.labelWidth || !p.labelHeight) {
+      p.labelWidth = p.labelEl.scrollWidth;
+      p.labelHeight = p.labelEl.scrollHeight;
+      p.labelSizeDirty = false;
+    }
+    // Compact labels stay inside their own panel. That keeps tightly packed
+    // parallel branches (especially Transformer Q/K/V) from covering one
+    // another. Details return outside the panel at high zoom.
+    const verticalFit = layoutMode === "compact"
+      ? Math.max(0.05, (panelHeight - 8) / Math.max(p.labelHeight, 1))
+      : labelStyle.scale;
+    const scale = Math.min(labelStyle.scale, verticalFit);
+    if (scale < LABEL_READABLE_SCALE) {
+      p.labelEl.style.display = "none";
+      continue;
+    }
+    const renderedWidth = p.labelWidth * scale;
+    const renderedHeight = p.labelHeight * scale;
+    const gap = 8 * scale;
+    const labelX = layoutMode === "compact"
+      ? Math.max(8, Math.min(sx + 4, viewWidth - renderedWidth - 8))
+      : Math.max(8, Math.min(sx, viewWidth - renderedWidth - 8));
+    let labelY;
+    if (layoutMode === "compact") {
+      labelY = Math.min(sy + 4, sy + panelHeight - renderedHeight - 4);
+    } else {
+      labelY = sy - renderedHeight - gap;
+      if (labelY < 8) labelY = sy + panelHeight + gap;
+    }
+    labelY = Math.max(8, Math.min(labelY, viewHeight - renderedHeight - 8));
+    p.labelEl.style.opacity = labelStyle.opacity.toFixed(3);
+    p.labelEl.style.transform = `translate(${labelX}px, ${labelY}px) scale(${scale})`;
   }
   const wantEdges = mode === "graph";
   edgesEl.style.display = wantEdges ? "" : "none";
@@ -327,7 +607,7 @@ function positionOverlay() {
   const seen = new Set();
   for (const [s, d] of edges) {
     const a = byName.get(s), b = byName.get(d);
-    if (!a || !b || a.texW <= 0 || b.texW <= 0) continue;
+    if (!a || !b || !panelReady(a) || !panelReady(b)) continue;
     const key = s + "→" + d;
     seen.add(key);
     let path = edgePaths.get(key);
@@ -347,7 +627,8 @@ function positionOverlay() {
 
 // ------------------------------------------------------------------ instances
 function rebuildInstances() {
-  const live = panelOrder.map((id) => panels.get(id)).filter((p) => p.texW > 0 && p.layer >= 0);
+  const live = panelOrder.map((id) => panels.get(id))
+    .filter((p) => p.kind !== "metric" && p.texW > 0 && p.layer >= 0);
   instCount = live.length;
   if (instData.length < instCount * 10) instData = new Float32Array(instCount * 10 * 2);
   live.forEach((p, i) => {
@@ -369,13 +650,60 @@ function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
     canvas.width = w * dpr; canvas.height = h * dpr;
+    metricCanvas.width = w * dpr; metricCanvas.height = h * dpr;
+  }
+}
+
+function renderMetrics() {
+  const dpr = window.devicePixelRatio || 1;
+  metric2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+  metric2d.clearRect(0, 0, metricCanvas.width / dpr, metricCanvas.height / dpr);
+  for (const p of panels.values()) {
+    if (p.kind !== "metric" || !panelReady(p)) continue;
+    const values = p.historyData;
+    const finite = values.filter(Number.isFinite);
+    if (!finite.length) continue;
+    let lo = Math.min(...finite), hi = Math.max(...finite);
+    if (lo === hi) {
+      const pad = Math.max(Math.abs(lo) * 0.05, 1e-6);
+      lo -= pad; hi += pad;
+    }
+    const x = p.x * cam.zoom + cam.x;
+    const y = p.y * cam.zoom + cam.y;
+    const w = p.dw * cam.zoom;
+    const h = p.dh * cam.zoom;
+    if (w < 2 || h < 2) continue;
+    metric2d.fillStyle = "rgba(19, 24, 38, 0.92)";
+    metric2d.fillRect(x, y, w, h);
+    metric2d.strokeStyle = "rgba(124, 136, 161, 0.20)";
+    metric2d.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      const gy = y + h * i / 4;
+      metric2d.beginPath(); metric2d.moveTo(x, gy); metric2d.lineTo(x + w, gy); metric2d.stroke();
+    }
+    const stops = CMAP_STOPS[p.cmap] || CMAP_STOPS.turbo;
+    const color = stops[Math.floor(stops.length * 0.72)];
+    metric2d.strokeStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+    metric2d.lineWidth = Math.max(1.25, Math.min(2.5, cam.zoom * 1.5));
+    metric2d.beginPath();
+    let drawing = false;
+    values.forEach((value, i) => {
+      if (!Number.isFinite(value)) { drawing = false; return; }
+      const px = x + (values.length === 1 ? w : i * w / (values.length - 1));
+      const py = y + h - (value - lo) / (hi - lo) * h;
+      if (drawing) metric2d.lineTo(px, py);
+      else { metric2d.moveTo(px, py); drawing = true; }
+    });
+    metric2d.stroke();
+    metric2d.strokeStyle = "rgba(90, 208, 177, 0.45)";
+    metric2d.strokeRect(x, y, w, h);
   }
 }
 
 function fitView() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of panels.values()) {
-    if (p.texW <= 0) continue;
+    if (!panelReady(p)) continue;
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y - 50);
     maxX = Math.max(maxX, p.x + p.dw); maxY = Math.max(maxY, p.y + p.dh);
   }
@@ -398,6 +726,7 @@ function render() {
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0.043, 0.055, 0.078, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  renderMetrics();
   gl.useProgram(prog);
   gl.bindVertexArray(vao);
   gl.uniform2f(U.uPan, cam.x, cam.y);
@@ -420,16 +749,19 @@ function render() {
     const mb = bytesReceived / (now - lastHud) * 1000 / 1e6;
     bytesReceived = 0;
     lastHud = now;
-    let cells = 0;
-    for (const p of panels.values()) cells += (p.rows || 0) * (p.cols || 0);
+    let cells = 0, tensorCount = 0, metricCount = 0;
+    for (const p of panels.values()) {
+      if (p.kind === "metric") metricCount++;
+      else { tensorCount++; cells += (p.rows || 0) * (p.cols || 0); }
+    }
     $("hud").textContent =
-      `${panels.size} tensors · ${cells.toLocaleString()} cells · ${mb.toFixed(1)} MB/s · ${fps} fps`;
+      `${tensorCount} tensors · ${metricCount} metrics · ${cells.toLocaleString()} cells · ${mb.toFixed(1)} MB/s · ${fps} fps`;
   }
-  $("empty").hidden = panels.size > 0;
+  $("empty").hidden = instCountEstimate() > 0;
 }
 function instCountEstimate() {
   let n = 0;
-  for (const p of panels.values()) if (p.texW > 0) n++;
+  for (const p of panels.values()) if (panelReady(p)) n++;
   return n;
 }
 requestAnimationFrame(render);
@@ -461,13 +793,22 @@ function handleJSON(msg) {
       let p = panels.get(w.id);
       if (!p) {
         p = { id: w.id, name: w.name, group: w.group, cmap: w.colormap,
+              label: w.label || "", role: w.role || "",
+              kind: w.kind || "tensor", history: w.history || 512,
+              historyData: [], latest: null,
               layer: -1, image: null, texW: 0, texH: 0, rows: 0, cols: 0,
               shape: null, vmin: 0, vmax: 1, mean: 0, std: 0, nan: 0,
-              x: 0, y: 0, dw: 0, dh: 0, labelEl: null };
+              x: 0, y: 0, dw: 0, dh: 0, labelEl: null,
+              labelWidth: 0, labelHeight: 0, labelSizeDirty: true,
+              labelSignature: "", labelLayoutKey: "" };
         panels.set(w.id, p);
         panelOrder.push(w.id);
       } else {
         p.name = w.name; p.group = w.group; p.cmap = w.colormap;
+        p.label = w.label || ""; p.role = w.role || "";
+        p.kind = w.kind || "tensor"; p.history = w.history || 512;
+        if (p.historyData.length > p.history)
+          p.historyData = p.historyData.slice(-p.history);
       }
     }
     for (const [id, p] of [...panels]) {
@@ -500,7 +841,7 @@ function handleBinary(buf) {
     : new Float32Array(buf.slice(off, off + meta.w * meta.h * 4));
   let p = panels.get(meta.id);
   if (!p) return; // structure message will (re)introduce it
-  const firstData = p.texW === 0;
+  const firstData = !panelReady(p);
   const resized = p.texW !== meta.w || p.texH !== meta.h;
   Object.assign(p, {
     texW: meta.w, texH: meta.h, rows: meta.rows, cols: meta.cols,
@@ -508,10 +849,19 @@ function handleBinary(buf) {
     mean: meta.mean, std: meta.std, nan: meta.nan, cmap: meta.cmap,
     group: meta.group,
   });
+  if (p.kind === "metric") {
+    const value = values.length ? Number(values[0]) : NaN;
+    p.latest = value;
+    p.historyData.push(value);
+    if (p.historyData.length > p.history) p.historyData.shift();
+    if (firstData) { needsLayout = true; needsFit = true; }
+    syncLabels();
+    return;
+  }
   p.image = values.slice(); // keep CPU copy for hover + pool re-allocation
   if (p.layer < 0) p.layer = allocLayer();
   if (p.layer >= 0) uploadLayer(p.layer, meta.w, meta.h, p.image);
-  if (firstData || resized) needsLayout = true;
+  if (firstData || resized) { needsLayout = true; needsFit = true; }
   instDirty = true;
   syncLabels();
 }
@@ -571,11 +921,22 @@ function hover(e) {
   const wy = (e.clientY - rect.top - cam.y) / cam.zoom;
   let hit = null;
   for (const p of panels.values()) {
-    if (p.texW > 0 && wx >= p.x && wx <= p.x + p.dw && wy >= p.y && wy <= p.y + p.dh) {
+    if (panelReady(p) && wx >= p.x && wx <= p.x + p.dw && wy >= p.y && wy <= p.y + p.dh) {
       hit = p; break;
     }
   }
   if (!hit || panning) { tooltip.hidden = true; pickPending = null; return; }
+  if (hit.kind === "metric") {
+    tooltip.hidden = false;
+    tooltip.style.left = (e.clientX - rect.left + 14) + "px";
+    tooltip.style.top = (e.clientY - rect.top + 14) + "px";
+    tooltip.innerHTML =
+      `<div>${escapeHTML(hit.label || hit.name)}</div>` +
+      (hit.label ? `<div class="path">${escapeHTML(hit.name)}</div>` : "") +
+      `<div class="v">${fmt(hit.latest)}</div>`;
+    pickPending = null;
+    return;
+  }
   const fu = (wx - hit.x) / hit.dw, fv = (wy - hit.y) / hit.dh;
   const row = Math.min(hit.rows - 1, Math.floor(fv * hit.rows));
   const col = Math.min(hit.cols - 1, Math.floor(fu * hit.cols));
@@ -587,7 +948,8 @@ function hover(e) {
   tooltip.style.top = (e.clientY - rect.top + 14) + "px";
   const lod = hit.texW < hit.cols || hit.texH < hit.rows;
   tooltip.innerHTML =
-    `<div>${hit.name} [${row}, ${col}]</div>` +
+    `<div>${escapeHTML(hit.label || hit.name)} [${row}, ${col}]</div>` +
+    (hit.label ? `<div class="path">${escapeHTML(hit.name)}</div>` : "") +
     `<div class="v" id="tt-value">${lod ? "block μ " : ""}${fmt(approx)}</div>`;
   if (lod && ws && ws.readyState === 1) {
     pickPending = { id: hit.id, row, col };
